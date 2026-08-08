@@ -65,3 +65,28 @@ class GeminiAnalyzer:
             return clean_latex(response.text.strip())
         except Exception as e:
             return f"⚠️ 인게임 분석 오류: {e}"
+
+    async def get_champion_tip(self, my_champ: str, vs_champ: str) -> str:
+        """1v1 챔피언 맞대결 팁 조회"""
+        prompt = f"""
+리그 오브 레전드 AI 코치로서 챔피언 1v1 맞대결 팁을 제시하세요.
+
+[내 챔피언]: {my_champ}
+[상대 챔피언]: {vs_champ}
+
+다음 항목을 마크다운 형식으로 작성하세요:
+1. **라인전 주도권 및 상성 요약**: 상성 우위 및 초기 라인 관리법
+2. **딜교환 핵심 팁**: 주요 스킬 타이밍 및 딜교환 콤보
+3. **주의해야 할 상대 핵심 스킬**: 피하거나 의식해야 할 스킬
+
+- LaTeX 수식 표현 금지.
+- 디스코드용 마크다운 형식 사용.
+"""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return clean_latex(response.text.strip())
+        except Exception as e:
+            return f"⚠️ 챔피언 팁 생성 오류: {e}"
