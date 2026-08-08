@@ -1,0 +1,8 @@
+discord.py
+aiohttp
+python-dotenv
+google-genai
+groq
+cachetools
+flask
+gunicorn
