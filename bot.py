@@ -42,6 +42,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 RIOT_KEY = os.getenv("RIOT_API_KEY")
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
 SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "false").lower() == "true"
 
 riot_client = RiotClient(api_key=RIOT_KEY)
@@ -55,45 +56,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 lol_group = app_commands.Group(name="롤", description="LoL AI 코치 분석 명령어 모음")
 bot.tree.add_command(lol_group)
 
-
-# --- 3초 타임아웃(10062 Unknown Interaction) 방어용 헬퍼 함수 ---
-async def safe_defer(interaction: discord.Interaction) -> bool:
-    """
-    안전하게 defer()를 수행합니다. 
-    네트워크 지연 등으로 이미 3초가 지나 Interaction이 만료된 경우 False를 반환합니다.
-    """
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.defer()
-        return True
-    except discord.NotFound:
-        print("⚠️ Interaction 만료됨 (디스코드 3초 타임아웃 초과)", flush=True)
-        return False
-    except Exception as e:
-        print(f"⚠️ defer 처리 중 에러: {e}", flush=True)
-        return False
-
-
-async def safe_send(interaction: discord.Interaction, content: str = None, embed: discord.Embed = None):
-    """
-    Interaction 상태에 따라 안전하게 응답을 전송합니다.
-    이미 만료된 Interaction이면 2차 크래시 없이 로그를 남깁니다.
-    """
-    try:
-        kwargs = {}
-        if content:
-            kwargs["content"] = content
-        if embed:
-            kwargs["embed"] = embed
-
-        if interaction.response.is_done():
-            await interaction.followup.send(**kwargs)
-        else:
-            await interaction.response.send_message(**kwargs)
-    except discord.NotFound:
-        print("⚠️ Interaction이 만료되어 메시지를 전송하지 못했습니다.", flush=True)
-    except Exception as e:
-        print(f"⚠️ 메시지 전송 중 오류: {e}", flush=True)
+# --- 포지션 선택지 정의 ---
+POSITION_CHOICES = [
+    app_commands.Choice(name="탑 (TOP)", value="탑"),
+    app_commands.Choice(name="정글 (JUNGLE)", value="정글"),
+    app_commands.Choice(name="미드 (MID)", value="미드"),
+    app_commands.Choice(name="원딜 (BOT/ADC)", value="원딜"),
+    app_commands.Choice(name="서폿 (SUPPORT)", value="서폿"),
+]
 
 
 def build_embed(title: str, description: str, color: discord.Color, rank_text: str | None = None) -> discord.Embed:
@@ -108,15 +78,7 @@ def build_embed(title: str, description: str, color: discord.Color, rank_text: s
 @bot.event
 async def on_ready():
     print(f"=== {bot.user.name} 봇 준비 완료! ===", flush=True)
-    
-    # 1. 첫 명령어 실행 시 aiohttp 세션 생성 지연을 막기 위해 미리 초기화
-    try:
-        await riot_client.init_session()
-        print("Riot API 세션 사전 초기화 완료", flush=True)
-    except Exception as e:
-        print(f"세션 초기화 경고: {e}", flush=True)
 
-    # 2. 슬래시 명령어 동기화
     if SYNC_COMMANDS:
         try:
             synced = await bot.tree.sync()
@@ -135,6 +97,7 @@ async def on_ready():
 @bot.command(name="sync")
 @commands.is_owner()
 async def manual_sync(ctx: commands.Context):
+    """봇 소유자 전용: 슬래시 명령어를 수동으로 동기화합니다."""
     synced = await bot.tree.sync()
     await ctx.send(f"✅ {len(synced)}개 명령어 동기화 완료")
 
@@ -154,10 +117,7 @@ async def _get_rank_text(puuid: str) -> str:
 @lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석합니다.")
 @app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
 async def match_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
-    # defer 실패 시(3초 초과) API 호출 없이 즉시 종료
-    if not await safe_defer(interaction):
-        return
-
+    await interaction.response.defer()
     try:
         account = await riot_client.get_account_by_riot_id(game_name, tag_line)
         puuid = account["puuid"]
@@ -166,7 +126,7 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
 
         match_ids = await riot_client.get_recent_matches(puuid, count=5)
         if not match_ids:
-            await safe_send(interaction, content="⚠️ 최근 게임 기록이 없습니다.")
+            await interaction.followup.send("⚠️ 최근 게임 기록이 없습니다.")
             return
 
         lines = []
@@ -187,7 +147,7 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
             )
 
         if not lines:
-            await safe_send(interaction, content="⚠️ 매치 상세 데이터를 가져오지 못했습니다.")
+            await interaction.followup.send("⚠️ 매치 상세 데이터를 가져오지 못했습니다.")
             return
 
         summary_text = f"현재 솔로랭크 티어: {rank_text}\n\n최근 {len(lines)}경기 기록:\n" + "\n".join(lines)
@@ -202,22 +162,20 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
             color=discord.Color.blue(),
             rank_text=rank_text,
         )
-        await safe_send(interaction, embed=embed)
+        await interaction.followup.send(embed=embed)
 
     except RiotAPIError as e:
-        await safe_send(interaction, content=f"⚠️ {e.message}")
+        await interaction.followup.send(f"⚠️ {e.message}")
     except Exception as e:
         print(f"전적 분석 처리 에러: {e}", flush=True)
-        await safe_send(interaction, content=f"⚠️ 처리 중 오류가 발생했습니다: {e}")
+        await interaction.followup.send(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
 
 
 # 2. /롤 인게임
 @lol_group.command(name="인게임", description="현재 진행 중인 게임의 팀 조합 분석과 승리 플랜을 제공합니다.")
 @app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
 async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
-    if not await safe_defer(interaction):
-        return
-
+    await interaction.response.defer()
     try:
         account = await riot_client.get_account_by_riot_id(game_name, tag_line)
         puuid = account["puuid"]
@@ -226,22 +184,21 @@ async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_
             game_data = await riot_client.get_active_game(puuid)
         except RiotAPIError as e:
             if e.status in (401, 403):
-                await safe_send(
-                    interaction,
-                    content="⚠️ 라이엇의 실시간 관전(Spectator) API 정책 변경(2025-10, 패치 25.20 익명 모드)으로 "
+                await interaction.followup.send(
+                    "⚠️ 라이엇의 실시간 관전(Spectator) API 정책 변경(2025-10, 패치 25.20 익명 모드)으로 "
                     "인게임 조회가 현재 제한되어 있을 수 있습니다. 대신 `/롤 전적`으로 최근 경기 분석을 이용해주세요."
                 )
                 return
             raise
 
         if not game_data:
-            await safe_send(interaction, content=f"🎮 `{game_name}#{tag_line}` 님은 현재 게임 중이 아닙니다.")
+            await interaction.followup.send(f"🎮 `{game_name}#{tag_line}` 님은 현재 게임 중이 아닙니다.")
             return
 
         participants = game_data.get("participants", [])
         my_p = next((p for p in participants if p.get("puuid") == puuid), None)
         if not my_p:
-            await safe_send(interaction, content="❌ 게임 참가자 정보를 찾을 수 없습니다.")
+            await interaction.followup.send("❌ 게임 참가자 정보를 찾을 수 없습니다.")
             return
 
         my_team_id = my_p["teamId"]
@@ -266,34 +223,53 @@ async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_
             description=analysis_res,
             color=discord.Color.brand_green(),
         )
-        await safe_send(interaction, embed=embed)
+        await interaction.followup.send(embed=embed)
 
     except RiotAPIError as e:
-        await safe_send(interaction, content=f"⚠️ {e.message}")
+        await interaction.followup.send(f"⚠️ {e.message}")
     except Exception as e:
         print(f"인게임 분석 처리 에러: {e}", flush=True)
-        await safe_send(interaction, content=f"⚠️ 처리 중 오류가 발생했습니다: {e}")
+        await interaction.followup.send(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
 
 
-# 3. /롤 팁
-@lol_group.command(name="팁", description="라인전 대전상대 챔피언 맞대결 팁을 조회합니다.")
-@app_commands.describe(my_champ="내 챔피언 이름", vs_champ="상대 챔피언 이름")
-async def champion_tip(interaction: discord.Interaction, my_champ: str, vs_champ: str):
-    if not await safe_defer(interaction):
-        return
+# 3. /롤 팁 (포지션 선택 기능 반영)
+@lol_group.command(name="팁", description="포지션별 대전상대 챔피언 맞대결 팁을 조회합니다.")
+@app_commands.describe(
+    position="플레이할 라인/포지션을 선택하세요",
+    my_champ="내 챔피언 이름",
+    vs_champ="상대 챔피언 이름"
+)
+@app_commands.choices(position=POSITION_CHOICES)
+async def champion_tip(
+    interaction: discord.Interaction,
+    position: app_commands.Choice[str],
+    my_champ: str,
+    vs_champ: str
+):
+    await interaction.response.defer()
+    selected_position = position.value
 
     try:
-        tip_msg = await asyncio.to_thread(gemini_analyzer.get_champion_tip, my_champ, vs_champ)
+        # gemini_analyzer.get_champion_tip 메소드가 3개 인자(position 포함)를 지원하는지 시도
+        try:
+            tip_msg = await asyncio.to_thread(
+                gemini_analyzer.get_champion_tip, my_champ, vs_champ, selected_position
+            )
+        except TypeError:
+            # 기존 2개 인자만 받는 버전일 경우 position 정보를 my_champ 문자열 앞에 합성하여 전달
+            tip_msg = await asyncio.to_thread(
+                gemini_analyzer.get_champion_tip, f"[{selected_position}] {my_champ}", vs_champ
+            )
 
         embed = build_embed(
-            title=f"🥊 {my_champ} vs {vs_champ} 라인전 맞대결 팁",
+            title=f"🥊 [{selected_position}] {my_champ} vs {vs_champ} 라인전 맞대결 팁",
             description=tip_msg,
             color=discord.Color.gold(),
         )
-        await safe_send(interaction, embed=embed)
+        await interaction.followup.send(embed=embed)
     except Exception as e:
         print(f"롤팁 처리 에러: {e}", flush=True)
-        await safe_send(interaction, content=f"⚠️ 팁을 생성하는 동안 오류가 발생했습니다: {e}")
+        await interaction.followup.send(f"⚠️ 팁을 생성하는 동안 오류가 발생했습니다: {e}")
 
 
 if __name__ == "__main__":
