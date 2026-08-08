@@ -10,10 +10,21 @@ def clean_latex(text: str) -> str:
     return text.strip()
 
 class GeminiAnalyzer:
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str, model_name: str = "gemini-3.6-flash"):
         self.api_key = api_key
-        self.model_name = model_name
+        self.model_name = model_name or "gemini-3.6-flash"
         self.client = genai.Client(api_key=api_key)
+
+    def _generate(self, prompt: str) -> str:
+        """Gemini API 호출 및 응답 처리"""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return clean_latex(response.text.strip())
+        except Exception as e:
+            return f"⚠️ AI 생성 실패: {e}"
 
     async def analyze_match_history(self, summoner_name: str, match_summary_text: str) -> str:
         """최근 전적 및 피드백 분석"""
@@ -30,14 +41,7 @@ class GeminiAnalyzer:
 
 - LaTeX 수식 문법 사용 금지.
 """
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt
-            )
-            return clean_latex(response.text.strip())
-        except Exception as e:
-            return f"⚠️ AI 전적 분석 실패: {e}"
+        return self._generate(prompt)
 
     async def analyze_ingame(self, my_champ: str, vs_champ: str, my_team: list, enemy_team: list) -> str:
         """인게임 매치업 및 승리 플랜 분석"""
@@ -57,14 +61,7 @@ class GeminiAnalyzer:
 - LaTeX 수식 표현($, \\Large 등) 금지.
 - 디스코드에 출력하기 좋은 핵심 위주 마크다운 형식 사용.
 """
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt
-            )
-            return clean_latex(response.text.strip())
-        except Exception as e:
-            return f"⚠️ 인게임 분석 오류: {e}"
+        return self._generate(prompt)
 
     async def get_champion_tip(self, my_champ: str, vs_champ: str) -> str:
         """1v1 챔피언 맞대결 팁 조회"""
@@ -82,11 +79,4 @@ class GeminiAnalyzer:
 - LaTeX 수식 표현 금지.
 - 디스코드용 마크다운 형식 사용.
 """
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt
-            )
-            return clean_latex(response.text.strip())
-        except Exception as e:
-            return f"⚠️ 챔피언 팁 생성 오류: {e}"
+        return self._generate(prompt)
