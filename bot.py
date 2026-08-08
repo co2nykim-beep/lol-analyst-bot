@@ -1,175 +1,92 @@
-import os
-import threading
-import traceback
-from flask import Flask
-import discord
-from discord import app_commands
-from discord.ext import commands
-from dotenv import load_dotenv
+import re
+from google import genai
 
-from riot_client import RiotClient
-from gemini_analyzer import GeminiAnalyzer
+def clean_latex(text: str) -> str:
+    """LaTeX 표현 및 특수 태그 제거/정리"""
+    if not text:
+        return ""
+    text = re.sub(r'\\(?:Large|large|huge|Huge|small|tiny|bf|it)\b', '', text)
+    text = re.sub(r'\$\$?', '', text)
+    return text.strip()
 
-# --- Render 24시간 가동용 Flask 서버 설정 ---
-app = Flask('')
+class GeminiAnalyzer:
+    def __init__(self, api_key: str, model_name: str = "gemini-3.6-flash"):
+        self.api_key = api_key
+        self.model_name = model_name
+        self.client = genai.Client(api_key=api_key)
 
-@app.route('/')
-def home():
-    return "Bot is alive!"
+    async def analyze_match_history(self, summoner_name: str, match_summary_text: str) -> str:
+        """최근 전적 및 피드백 분석"""
+        prompt = f"""
+리그 오브 레전드 AI 코치로서 소환사 '{summoner_name}'의 최근 전적 데이터를 분석해 주세요.
 
-def run():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+[전적 요약 데이터]
+{match_summary_text}
 
-def keep_alive():
-    t = threading.Thread(target=run)
-    t.daemon = True
-    t.start()
+다음 사항을 포함하여 디스코드에 보기 좋은 마크다운 형식으로 작성하세요:
+1. **플레이 스타일 총평**: 주 라인, 챔피언 폭, KDA/승률 종합 평가
+2. **강점 및 보완점**: 잘하고 있는 점과 개선이 필요한 부분
+3. **AI 추천 티어업 팁**: 승률을 올리기 위한 핵심 조언 2~3가지
 
-keep_alive()
-# ----------------------------------------
+- LaTeX 수식 문법 사용 금지.
+"""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return clean_latex(response.text.strip())
+        except Exception as e:
+            return f"⚠️ AI 전적 분석 실패: {e}"
 
-load_dotenv()
-DISCORD_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-GEMINI_KEY = os.getenv('GEMINI_API_KEY')
-RIOT_KEY = os.getenv('RIOT_API_KEY')
-MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+    async def analyze_ingame(self, my_champ: str, vs_champ: str, my_team: list, enemy_team: list) -> str:
+        """인게임 매치업 및 승리 플랜 분석"""
+        prompt = f"""
+리그 오브 레전드 AI 코치로서 현재 진행 중인 게임을 분석하세요.
 
-riot_client = RiotClient(api_key=RIOT_KEY)
-gemini_analyzer = GeminiAnalyzer(api_key=GEMINI_KEY, model_name=MODEL_NAME)
+[내 챔피언]: {my_champ}
+[상대 라이너 챔피언]: {vs_champ}
+[우리 팀 조합]: {', '.join(my_team)}
+[상대 팀 조합]: {', '.join(enemy_team)}
 
-intents = discord.Intents.default()
-intents.message_content = True
+다음 항목을 핵심 위주로 명확하게 작성하세요:
+1. **라인전 맞대결 핵심 팁**: {my_champ} vs {vs_champ} 라인전 핵심 딜교환 및 스킬 활용법
+2. **주의해야 할 상대 주요 챔피언/스킬**: 한타나 로밍 시 경계해야 할 요소
+3. **팀 승리 플랜**: 조합 특성을 고려한 한타 또는 운영 방향성
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+- LaTeX 수식 표현($, \\Large 등) 금지.
+- 디스코드에 출력하기 좋은 핵심 위주 마크다운 형식 사용.
+"""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return clean_latex(response.text.strip())
+        except Exception as e:
+            return f"⚠️ 인게임 분석 오류: {e}"
 
-# 명령어 그룹 정의 (/롤 전적, /롤 인게임, /롤 팁)
-lol_group = app_commands.Group(name="롤", description="LoL AI 코치 분석 명령어 모음")
+    async def get_champion_tip(self, my_champ: str, vs_champ: str) -> str:
+        """1v1 챔피언 맞대결 팁 조회"""
+        prompt = f"""
+리그 오브 레전드 AI 코치로서 챔피언 1v1 맞대결 팁을 제시하세요.
 
-async def send_embed_response(interaction: discord.Interaction, embed: discord.Embed, view=None):
-    """안전하게 디스코드 Embed 메시지를 전송하는 헬퍼 함수"""
-    try:
-        kwargs = {"embed": embed}
-        if view is not None:
-            kwargs["view"] = view
-        
-        if interaction.response.is_done():
-            await interaction.followup.send(**kwargs)
-        else:
-            await interaction.response.send_message(**kwargs)
-    except Exception as e:
-        print(f"응답 전송 중 오류 발생: {e}")
-        traceback.print_exc()
+[내 챔피언]: {my_champ}
+[상대 챔피언]: {vs_champ}
 
-@bot.event
-async def on_ready():
-    print(f"=== {bot.user.name} 봇 준비 완료! ===")
-    try:
-        bot.tree.add_command(lol_group)
-        synced = await bot.tree.sync()
-        print(f"등록된 슬래시 명령어 개수: {len(synced)}개")
-    except Exception as e:
-        print(f"명령어 동기화 실패: {e}")
+다음 항목을 마크다운 형식으로 작성하세요:
+1. **라인전 주도권 및 상성 요약**: 상성 우위 및 초기 라인 관리법
+2. **딜교환 핵심 팁**: 주요 스킬 타이밍 및 딜교환 콤보
+3. **주의해야 할 상대 핵심 스킬**: 피하거나 의식해야 할 스킬
 
-# 1. /롤 전적
-@lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석합니다.")
-@app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
-async def match_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
-    await interaction.response.defer()
-    try:
-        account = await riot_client.get_account_by_riot_id(game_name, tag_line)
-        if not account:
-            await interaction.followup.send(f"❌ `{game_name}#{tag_line}` 소환사를 찾을 수 없습니다.")
-            return
-
-        puuid = account['puuid']
-        matches = await riot_client.get_recent_matches(puuid, count=5)
-        
-        if not matches:
-            await interaction.followup.send(f"⚠️ 최근 게임 데이터를 불러올 수 없습니다.")
-            return
-
-        summary_text = f"소환사 {game_name}#{tag_line} 최근 5경기 매치 ID 목록: {', '.join(matches)}"
-        analysis_res = await gemini_analyzer.analyze_match_history(f"{game_name}#{tag_line}", summary_text)
-
-        embed = discord.Embed(
-            title=f"📊 {game_name}#{tag_line} AI 전적 분석 결과",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="💡 AI 코치 총평", value=analysis_res, inline=False)
-        
-        await send_embed_response(interaction, embed)
-    except Exception as e:
-        print(f"전적 분석 명령어 처리 중 에러 발생: {e}")
-        await interaction.followup.send(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
-
-# 2. /롤 인게임
-@lol_group.command(name="인게임", description="현재 진행 중인 게임의 대전 팁과 승리 플랜을 분석합니다.")
-@app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
-async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
-    await interaction.response.defer()
-    try:
-        account = await riot_client.get_account_by_riot_id(game_name, tag_line)
-        if not account:
-            await interaction.followup.send(f"❌ `{game_name}#{tag_line}` 소환사를 찾을 수 없습니다.")
-            return
-
-        puuid = account['puuid']
-        game_data = await riot_client.get_active_game(puuid)
-        if not game_data:
-            await interaction.followup.send(f"🎮 `{game_name}#{tag_line}` 님은 현재 진행 중인 게임이 없습니다.")
-            return
-
-        participants = game_data.get('participants', [])
-        my_participant = next((p for p in participants if p.get('puuid') == puuid), None)
-        
-        if not my_participant:
-            await interaction.followup.send("❌ 게임 참가자 정보를 불러오는데 실패했습니다.")
-            return
-
-        my_team_id = my_participant['teamId']
-        my_champ = str(my_participant['championId'])
-        
-        my_team = [str(p['championId']) for p in participants if p['teamId'] == my_team_id]
-        enemy_team = [str(p['championId']) for p in participants if p['teamId'] != my_team_id]
-        
-        analysis_res = await gemini_analyzer.analyze_ingame(
-            my_champ=my_champ,
-            vs_champ="상대 라이너",
-            my_team=my_team,
-            enemy_team=enemy_team
-        )
-
-        embed = discord.Embed(
-            title=f"⚔️ {game_name}#{tag_line} 실시간 인게임 코칭",
-            color=discord.Color.brand_green()
-        )
-        embed.add_field(name="💡 AI 코치 분석", value=analysis_res, inline=False)
-        
-        await send_embed_response(interaction, embed)
-    except Exception as e:
-        print(f"인게임 분석 명령어 처리 중 에러 발생: {e}")
-        await interaction.followup.send(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
-
-# 3. /롤 팁
-@lol_group.command(name="팁", description="라인전 대전상대 챔피언 맞대결 팁을 조회합니다.")
-@app_commands.describe(my_champ="내 챔피언 이름", vs_champ="상대 챔피언 이름")
-async def champion_tip(interaction: discord.Interaction, my_champ: str, vs_champ: str):
-    await interaction.response.defer()
-    try:
-        tip_msg = await gemini_analyzer.get_champion_tip(my_champ, vs_champ)
-
-        embed = discord.Embed(
-            title=f"🥊 {my_champ} vs {vs_champ} 라인전 맞대결 팁",
-            color=discord.Color.gold()
-        )
-        embed.add_field(name="💡 AI 코치 조언", value=tip_msg, inline=False)
-        
-        await send_embed_response(interaction, embed)
-    except Exception as e:
-        print(f"롤팁 명령어 처리 중 에러 발생: {e}")
-        traceback.print_exc()
-        await interaction.followup.send(f"⚠️ 팁을 생성하는 동안 오류가 발생했습니다: {e}")
-
-if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+- LaTeX 수식 표현 금지.
+- 디스코드용 마크다운 형식 사용.
+"""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return clean_latex(response.text.strip())
+        except Exception as e:
+            return f"⚠️ 챔피언 팁 생성 오류: {e}"
