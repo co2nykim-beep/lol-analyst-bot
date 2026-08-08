@@ -11,19 +11,21 @@ from dotenv import load_dotenv
 from riot_client import RiotClient
 from gemini_analyzer import GeminiAnalyzer
 
-# --- Render 24시간 가동용 Flask 서버 설정 ---
+# --- Render 24시간 가동용 Flask 헬스체크 서버 ---
 app = Flask('')
 
 @app.route('/')
 def home():
     return "Bot is alive!"
 
-def run():
+def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Werkzeug 개발 서버 경고를 무시하고 헬스체크 수신
+    from werkzeug.serving import run_simple
+    run_simple('0.0.0.0', port, app, use_reloader=False, use_debugger=False)
 
 def keep_alive():
-    t = threading.Thread(target=run)
+    t = threading.Thread(target=run_flask)
     t.daemon = True
     t.start()
 
@@ -46,7 +48,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 lol_group = app_commands.Group(name="롤", description="LoL AI 코치 분석 명령어 모음")
 
-# 명령어 동기화 중복 실행 방지 플래그
+# 명령어 중복 동기화(429 Rate Limit) 방지 플래그
 is_synced = False
 
 async def send_embed_response(interaction: discord.Interaction, embed: discord.Embed, view=None):
@@ -68,7 +70,6 @@ async def on_ready():
     global is_synced
     print(f"=== {bot.user.name} 봇 준비 완료! ===")
     
-    # 봇 재접속 시 명령어 과도한 동기화로 인한 Rate Limit(429) 방지
     if not is_synced:
         try:
             bot.tree.add_command(lol_group)
