@@ -1,5 +1,6 @@
 import os
 import threading
+import asyncio
 import traceback
 from flask import Flask
 import discord
@@ -92,7 +93,11 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
             return
 
         summary_text = f"소환사 {game_name}#{tag_line} 최근 5경기 매치 ID 목록: {', '.join(matches)}"
-        analysis_res = await gemini_analyzer.analyze_match_history(f"{game_name}#{tag_line}", summary_text)
+        
+        # asyncio.to_thread로 이벤트 루프 멈춤 방지
+        analysis_res = await asyncio.to_thread(
+            gemini_analyzer.analyze_match_history, f"{game_name}#{tag_line}", summary_text
+        )
 
         embed = discord.Embed(
             title=f"📊 {game_name}#{tag_line} AI 전적 분석 결과",
@@ -139,11 +144,13 @@ async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_
         my_team = [str(p['championId']) for p in participants if p['teamId'] == my_team_id]
         enemy_team = [str(p['championId']) for p in participants if p['teamId'] != my_team_id]
         
-        analysis_res = await gemini_analyzer.analyze_ingame(
-            my_champ=my_champ,
-            vs_champ="상대 라이너",
-            my_team=my_team,
-            enemy_team=enemy_team
+        # asyncio.to_thread로 이벤트 루프 멈춤 방지
+        analysis_res = await asyncio.to_thread(
+            gemini_analyzer.analyze_ingame,
+            my_champ,
+            "상대 라이너",
+            my_team,
+            enemy_team
         )
 
         embed = discord.Embed(
@@ -167,7 +174,10 @@ async def champion_tip(interaction: discord.Interaction, my_champ: str, vs_champ
         pass
 
     try:
-        tip_msg = await gemini_analyzer.get_champion_tip(my_champ, vs_champ)
+        # asyncio.to_thread로 이벤트 루프 멈춤 방지
+        tip_msg = await asyncio.to_thread(
+            gemini_analyzer.get_champion_tip, my_champ, vs_champ
+        )
 
         embed = discord.Embed(
             title=f"🥊 {my_champ} vs {vs_champ} 라인전 맞대결 팁",
