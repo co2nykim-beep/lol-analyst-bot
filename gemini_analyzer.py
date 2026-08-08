@@ -26,7 +26,7 @@ class GeminiAnalyzer:
         except Exception as e:
             return f"⚠️ AI 생성 실패: {e}"
 
-    async def analyze_match_history(self, summoner_name: str, match_summary_text: str) -> str:
+    def analyze_match_history(self, summoner_name: str, match_summary_text: str) -> str:
         """최근 전적 및 피드백 분석"""
         prompt = f"""
 리그 오브 레전드 AI 코치로서 소환사 '{summoner_name}'의 최근 전적 데이터를 분석해 주세요.
@@ -43,7 +43,7 @@ class GeminiAnalyzer:
 """
         return self._generate(prompt)
 
-    async def analyze_ingame(self, my_champ: str, vs_champ: str, my_team: list, enemy_team: list) -> str:
+    def analyze_ingame(self, my_champ: str, vs_champ: str, my_team: list, enemy_team: list) -> str:
         """인게임 매치업 및 승리 플랜 분석"""
         prompt = f"""
 리그 오브 레전드 AI 코치로서 현재 진행 중인 게임을 분석하세요.
@@ -63,7 +63,7 @@ class GeminiAnalyzer:
 """
         return self._generate(prompt)
 
-    async def get_champion_tip(self, my_champ: str, vs_champ: str) -> str:
+    def get_champion_tip(self, my_champ: str, vs_champ: str) -> str:
         """1v1 챔피언 맞대결 팁 조회"""
         prompt = f"""
 리그 오브 레전드 AI 코치로서 챔피언 1v1 맞대결 팁을 제시하세요.
