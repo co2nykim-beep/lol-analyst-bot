@@ -46,6 +46,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 lol_group = app_commands.Group(name="롤", description="LoL AI 코치 분석 명령어 모음")
 
+# 명령어 동기화 중복 실행 방지 플래그
+is_synced = False
+
 async def send_embed_response(interaction: discord.Interaction, embed: discord.Embed, view=None):
     """안전하게 디스코드 Embed 메시지를 전송하는 헬퍼 함수"""
     try:
@@ -62,13 +65,23 @@ async def send_embed_response(interaction: discord.Interaction, embed: discord.E
 
 @bot.event
 async def on_ready():
+    global is_synced
     print(f"=== {bot.user.name} 봇 준비 완료! ===")
-    try:
-        bot.tree.add_command(lol_group)
-        synced = await bot.tree.sync()
-        print(f"등록된 슬래시 명령어 개수: {len(synced)}개")
-    except Exception as e:
-        print(f"명령어 동기화 실패: {e}")
+    
+    # 봇 재접속 시 명령어 과도한 동기화로 인한 Rate Limit(429) 방지
+    if not is_synced:
+        try:
+            bot.tree.add_command(lol_group)
+            synced = await bot.tree.sync()
+            print(f"등록된 슬래시 명령어 개수: {len(synced)}개")
+            is_synced = True
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                print("⚠️ 디스코드 API Rate Limit 발생: 명령어 동기화를 대기합니다.")
+            else:
+                print(f"명령어 동기화 HTTP 오류: {e}")
+        except Exception as e:
+            print(f"명령어 동기화 실패: {e}")
 
 # 1. /롤 전적
 @lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석합니다.")
@@ -94,7 +107,6 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
 
         summary_text = f"소환사 {game_name}#{tag_line} 최근 5경기 매치 ID 목록: {', '.join(matches)}"
         
-        # asyncio.to_thread로 이벤트 루프 멈춤 방지
         analysis_res = await asyncio.to_thread(
             gemini_analyzer.analyze_match_history, f"{game_name}#{tag_line}", summary_text
         )
@@ -144,7 +156,6 @@ async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_
         my_team = [str(p['championId']) for p in participants if p['teamId'] == my_team_id]
         enemy_team = [str(p['championId']) for p in participants if p['teamId'] != my_team_id]
         
-        # asyncio.to_thread로 이벤트 루프 멈춤 방지
         analysis_res = await asyncio.to_thread(
             gemini_analyzer.analyze_ingame,
             my_champ,
@@ -174,7 +185,6 @@ async def champion_tip(interaction: discord.Interaction, my_champ: str, vs_champ
         pass
 
     try:
-        # asyncio.to_thread로 이벤트 루프 멈춤 방지
         tip_msg = await asyncio.to_thread(
             gemini_analyzer.get_champion_tip, my_champ, vs_champ
         )
