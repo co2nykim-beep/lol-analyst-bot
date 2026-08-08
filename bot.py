@@ -67,11 +67,20 @@ POSITION_CHOICES = [
 
 
 def build_embed(title: str, description: str, color: discord.Color, rank_text: str | None = None) -> discord.Embed:
+    """
+    공통 embed 생성 헬퍼 (직렬화 방어 로직 포함)
+    """
+    if description is None:
+        description = "분석 결과를 불러올 수 없습니다."
+    else:
+        description = str(description)
+
     if len(description) > 4000:
         description = description[:4000] + "\n\n...(내용이 길어 일부 생략됨)"
-    embed = discord.Embed(title=title, description=description, color=color)
+
+    embed = discord.Embed(title=str(title), description=description, color=color)
     if rank_text:
-        embed.add_field(name="🏆 현재 솔로랭크", value=rank_text, inline=False)
+        embed.add_field(name="🏆 현재 솔로랭크", value=str(rank_text), inline=False)
     return embed
 
 
@@ -152,9 +161,10 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
 
         summary_text = f"현재 솔로랭크 티어: {rank_text}\n\n최근 {len(lines)}경기 기록:\n" + "\n".join(lines)
 
-        analysis_res = await asyncio.to_thread(
+        raw_res = await asyncio.to_thread(
             gemini_analyzer.analyze_match_history, f"{game_name}#{tag_line}", summary_text
         )
+        analysis_res = str(raw_res) if raw_res is not None else "분석 결과를 생성하지 못했습니다."
 
         embed = build_embed(
             title=f"📊 {game_name}#{tag_line} AI 전적 분석 결과",
@@ -214,9 +224,10 @@ async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_
             if p["teamId"] != my_team_id
         ]
 
-        analysis_res = await asyncio.to_thread(
+        raw_res = await asyncio.to_thread(
             gemini_analyzer.analyze_ingame, my_champ, my_team, enemy_team
         )
+        analysis_res = str(raw_res) if raw_res is not None else "인게임 분석 결과를 생성하지 못했습니다."
 
         embed = build_embed(
             title=f"⚔️ {game_name}#{tag_line} 실시간 인게임 코칭",
@@ -232,7 +243,7 @@ async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_
         await interaction.followup.send(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
 
 
-# 3. /롤 팁 (포지션 선택 기능 반영)
+# 3. /롤 팁 (포지션 선택 기능 및 직렬화 방어 포함)
 @lol_group.command(name="팁", description="포지션별 대전상대 챔피언 맞대결 팁을 조회합니다.")
 @app_commands.describe(
     position="플레이할 라인/포지션을 선택하세요",
@@ -250,16 +261,16 @@ async def champion_tip(
     selected_position = position.value
 
     try:
-        # gemini_analyzer.get_champion_tip 메소드가 3개 인자(position 포함)를 지원하는지 시도
         try:
-            tip_msg = await asyncio.to_thread(
+            raw_tip = await asyncio.to_thread(
                 gemini_analyzer.get_champion_tip, my_champ, vs_champ, selected_position
             )
         except TypeError:
-            # 기존 2개 인자만 받는 버전일 경우 position 정보를 my_champ 문자열 앞에 합성하여 전달
-            tip_msg = await asyncio.to_thread(
+            raw_tip = await asyncio.to_thread(
                 gemini_analyzer.get_champion_tip, f"[{selected_position}] {my_champ}", vs_champ
             )
+
+        tip_msg = str(raw_tip) if raw_tip is not None else "맞대결 팁을 생성할 수 없습니다."
 
         embed = build_embed(
             title=f"🥊 [{selected_position}] {my_champ} vs {vs_champ} 라인전 맞대결 팁",
