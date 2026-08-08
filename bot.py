@@ -195,11 +195,13 @@ bot.tree.add_command(lol_group)
 
 @bot.event
 async def on_ready():
+    print(f"=== {bot.user.name} 봇 준비 완료! ===")
     try:
+        # 슬래시 명령어 동기화 필수!
         synced = await bot.tree.sync()
-        print(f"=== {bot.user.name} 봇 준비 완료! (동기화된 명령어: {len(synced)}개) ===")
+        print(f"등록된 슬래시 명령어 개수: {len(synced)}개")
     except Exception as e:
-        print(f"명령어 동기화 오류: {e}")
+        print(f"명령어 동기화 실패: {e}")
 
 @bot.event
 async def on_message(message):
