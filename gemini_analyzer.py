@@ -77,3 +77,29 @@ class GeminiAnalyzer:
             return clean_latex(response.text.strip())
         except Exception as e:
             return f"⚠️ 답변 생성 오류: {e}"
+            async def analyze_ingame(self, my_champ: str, vs_champ: str, my_team: list, enemy_team: list) -> str:
+        """인게임 매치업 및 승리 플랜 분석"""
+        prompt = f"""
+리그 오브 레전드 AI 코치로서 현재 진행 중인 게임을 분석하세요.
+
+[내 챔피언]: {my_champ}
+[상대 라이너 챔피언]: {vs_champ}
+[우리 팀 조합]: {', '.join(my_team)}
+[상대 팀 조합]: {', '.join(enemy_team)}
+
+다음 항목을 핵심 위주로 명확하게 작성하세요:
+1. **라인전 맞대결 핵심 팁**: {my_champ} vs {vs_champ} 라인전 핵심 딜교환 및 스킬 활용법
+2. **주의해야 할 상대 주요 챔피언/스킬**: 한타나 로밍 시 경계해야 할 요소
+3. **팀 승리 플랜**: 조합 특성을 고려한 한타 또는 운영 방향성
+
+- LaTeX 수식 표현($, \\Large 등) 금지.
+- 디스코드에 출력하기 좋은 핵심 위주 마크다운 형식 사용.
+"""
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            return response.text.strip()
+        except Exception as e:
+            return f"⚠️ 인게임 분석 오류: {e}"
