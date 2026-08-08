@@ -139,7 +139,7 @@ class RiotClient:
         headers = {"X-Riot-Token": self.api_key}
         async with self.session.get(url, headers=headers) as resp:
             if resp.status == 404:
-                return None  # 현재 게임 진행 중이 아님
+                return None
             if resp.status != 200:
                 return None
             return await resp.json()
