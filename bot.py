@@ -1,4 +1,26 @@
 import os
+import threading
+from flask import Flask
+
+# --- Render 24시간 가동용 Flask 서버 설정 ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = threading.Thread(target=run)
+    t.daemon = True
+    t.start()
+
+keep_alive()
+# ----------------------------------------
+import os
 import collections
 import aiohttp
 import discord
