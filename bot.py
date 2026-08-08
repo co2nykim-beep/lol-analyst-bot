@@ -214,3 +214,52 @@ async def on_message(message):
 
 if __name__ == '__main__':
     bot.run(DISCORD_TOKEN)
+@lol_group.command(name="인게임", description="현재 진행 중인 게임의 대전 팁과 승리 플랜을 분석합니다.")
+@app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
+async def ingame_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
+    await interaction.response.defer()
+    
+    # 1. PUUID 조회
+    account = await riot_client.get_account_by_riot_id(game_name, tag_line)
+    if not account:
+        await interaction.followup.send(f"❌ `{game_name}#{tag_line}` 소환사를 찾을 수 없습니다.")
+        return
+
+    puuid = account['puuid']
+    
+    # 2. 실시간 게임 데이터 조회
+    game_data = await riot_client.get_active_game(puuid)
+    if not game_data:
+        await interaction.followup.send(f"🎮 `{game_name}#{tag_line}` 님은 현재 진행 중인 게임이 없습니다.")
+        return
+
+    # 3. 내 챔피언 및 매치업 파악
+    participants = game_data.get('participants', [])
+    my_participant = next((p for p in participants if p.get('puuid') == puuid), None)
+    
+    if not my_participant:
+        await interaction.followup.send("❌ 게임 참가자 정보를 불러오는데 실패했습니다.")
+        return
+
+    my_team_id = my_participant['teamId']
+    my_champ_id = my_participant['championId']
+    
+    my_champ = str(my_champ_id)
+    my_team = [str(p['championId']) for p in participants if p['teamId'] == my_team_id]
+    enemy_team = [str(p['championId']) for p in participants if p['teamId'] != my_team_id]
+    
+    # 4. Gemini AI 분석 요청
+    analysis_res = await gemini_analyzer.analyze_ingame(
+        my_champ=my_champ,
+        vs_champ="상대 라이너",
+        my_team=my_team,
+        enemy_team=enemy_team
+    )
+
+    embed = discord.Embed(
+        title=f"⚔️ {game_name}#{tag_line} 실시간 인게임 코칭",
+        color=discord.Color.brand_green()
+    )
+    embed.add_field(name="💡 AI 코치 분석", value=analysis_res, inline=False)
+    
+    await interaction.followup.send(embed=embed)
