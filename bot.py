@@ -52,11 +52,8 @@ DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 RIOT_KEY = os.getenv("RIOT_API_KEY")
 
-# 요구사항 반영: 기본 모델을 gemini-3.6-flash로 지정
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
-SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "false").lower() == "true"
 
 riot_client = RiotClient(api_key=RIOT_KEY)
 gemini_analyzer = GeminiAnalyzer(api_key=GEMINI_KEY, model_name=MODEL_NAME)
@@ -83,17 +80,17 @@ def create_bot() -> commands.Bot:
 
     bot = commands.Bot(command_prefix="!", intents=intents)
     lol_group = app_commands.Group(name="롤", description="LoL AI 코치 분석 명령어 모음")
-    bot.tree.add_command(lol_group)
 
     @bot.event
     async def on_ready():
         print(f"=== {bot.user.name} 봇 연결 성공! ===", flush=True)
-        if SYNC_COMMANDS:
-            try:
-                synced = await bot.tree.sync()
-                print(f"등록된 슬래시 명령어 개수: {len(synced)}개", flush=True)
-            except Exception as e:
-                print(f"명령어 동기화 실패: {e}", flush=True)
+        try:
+            synced = await bot.tree.sync()
+            print(f"동기화 완료된 슬래시 명령어 개수: {len(synced)}개", flush=True)
+            for cmd in synced:
+                print(f" - 등록 명령어: /{cmd.name}", flush=True)
+        except Exception as e:
+            print(f"⚠️ 명령어 동기화 실패: {e}", flush=True)
 
     @bot.tree.error
     async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -121,6 +118,7 @@ def create_bot() -> commands.Bot:
 
         return f"솔로랭크: {solo_str} | 자유랭크: {flex_str}"
 
+    # 1. /롤 전적
     @lol_group.command(name="전적", description="소환사의 솔랭/자랭 선택 전적(최근 10경기)을 분석하고 1:1 코칭 스레드를 개설합니다.")
     @app_commands.describe(
         game_name="소환사 이름",
@@ -235,6 +233,59 @@ def create_bot() -> commands.Bot:
             await interaction.followup.send(f"⚠️ 라이엇 API 오류: {e.message}")
         except Exception as e:
             await interaction.followup.send(f"⚠️ 처리 도중 오류가 발생했습니다: {e}")
+
+    # 2. /롤 팁 (그룹 명령어)
+    @lol_group.command(name="팁", description="특정 챔피언 간의 상대법 및 라인전 팁을 조회합니다.")
+    @app_commands.describe(
+        my_champ="내 챔피언 이름 (예: 쉔, 밀리오)",
+        vs_champ="상대 챔피언 이름 (예: 카밀, 룰루)"
+    )
+    async def champion_tip_group(
+        interaction: discord.Interaction,
+        my_champ: str,
+        vs_champ: str
+    ):
+        await interaction.response.defer(thinking=True)
+        try:
+            raw_res = await asyncio.to_thread(
+                gemini_analyzer.get_champion_tip, my_champ, vs_champ
+            )
+            embed = build_embed(
+                title=f"⚔️ {my_champ} vs {vs_champ} 라인전 코칭 팁",
+                description=str(raw_res),
+                color=discord.Color.green(),
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ 팁 생성 중 오류가 발생했습니다: {e}")
+
+    # 3. /팁 (단독 명령어 호환용)
+    @bot.tree.command(name="팁", description="특정 챔피언 간의 상대법 및 라인전 팁을 조회합니다.")
+    @app_commands.describe(
+        my_champ="내 챔피언 이름 (예: 쉔, 밀리오)",
+        vs_champ="상대 챔피언 이름 (예: 카밀, 룰루)"
+    )
+    async def champion_tip_standalone(
+        interaction: discord.Interaction,
+        my_champ: str,
+        vs_champ: str
+    ):
+        await interaction.response.defer(thinking=True)
+        try:
+            raw_res = await asyncio.to_thread(
+                gemini_analyzer.get_champion_tip, my_champ, vs_champ
+            )
+            embed = build_embed(
+                title=f"⚔️ {my_champ} vs {vs_champ} 라인전 코칭 팁",
+                description=str(raw_res),
+                color=discord.Color.green(),
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ 팁 생성 중 오류가 발생했습니다: {e}")
+
+    # 그룹 명령어 동기화 트리 추가
+    bot.tree.add_command(lol_group)
 
     @bot.event
     async def on_message(message: discord.Message):
