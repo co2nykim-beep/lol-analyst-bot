@@ -67,7 +67,6 @@ def build_embed(title: str, description: str, color: discord.Color, rank_text: s
 
 
 def create_bot() -> commands.Bot:
-    """닫힌 세션 재사용 오류를 방지하기 위해 봇 객체와 이벤트 핸들러를 새롭게 생성합니다."""
     intents = discord.Intents.default()
     intents.message_content = True
 
@@ -77,21 +76,13 @@ def create_bot() -> commands.Bot:
 
     @bot.event
     async def on_ready():
-        print(f"=== {bot.user.name} 봇 준비 완료! ===", flush=True)
+        print(f"=== {bot.user.name} 봇 연결 성공! ===", flush=True)
         if SYNC_COMMANDS:
             try:
                 synced = await bot.tree.sync()
                 print(f"등록된 슬래시 명령어 개수: {len(synced)}개", flush=True)
             except Exception as e:
                 print(f"명령어 동기화 실패: {e}", flush=True)
-        else:
-            print("SYNC_COMMANDS=false → 이번 배포에서는 슬래시 명령어 동기화를 건너뜁니다.", flush=True)
-
-    @bot.command(name="sync")
-    @commands.is_owner()
-    async def manual_sync(ctx: commands.Context):
-        synced = await bot.tree.sync()
-        await ctx.send(f"✅ {len(synced)}개 명령어 동기화 완료")
 
     @bot.tree.error
     async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -106,89 +97,11 @@ def create_bot() -> commands.Bot:
         except discord.errors.NotFound:
             pass
 
-        if ADMIN_USER_ID != 0:
-            try:
-                admin = await bot.fetch_user(ADMIN_USER_ID)
-                ai_diagnosis = await asyncio.to_thread(gemini_analyzer.analyze_error, error_log)
-
-                report = (
-                    f"🚨 **디스코드 봇 실행 오류 발생**\n\n"
-                    f"**[에러 원본 로그]**\n```python\n{error_log[:1000]}\n```\n\n"
-                    f"💡 **Gemini AI 자동 진단 & 해결책:**\n{ai_diagnosis}"
-                )
-                if len(report) > 2000:
-                    for chunk in [report[i:i + 1900] for i in range(0, len(report), 1900)]:
-                        await admin.send(chunk)
-                else:
-                    await admin.send(report)
-            except Exception as dm_err:
-                print(f"관리자 DM 발송 실패: {dm_err}", flush=True)
-
-    class ApiKeyModal(discord.ui.Modal, title="라이엇 API 키 갱신"):
-        new_key = discord.ui.TextInput(
-            label="새 RIOT_API_KEY",
-            placeholder="RGAPI-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
-            style=discord.TextStyle.short,
-            required=True,
-        )
-
-        async def on_submit(self, interaction: discord.Interaction):
-            key_value = str(self.new_key.value).strip()
-            riot_client.api_key = key_value
-            os.environ["RIOT_API_KEY"] = key_value
-            await interaction.response.send_message(
-                f"✅ 라이엇 API 키가 즉시 갱신되었습니다! (`{key_value[:10]}...`)",
-                ephemeral=True,
-            )
-
-    @bot.tree.command(name="키갱신", description="[관리자 전용] 라이엇 API 키를 봇 재부팅 없이 즉시 갱신합니다.")
-    async def update_api_key(interaction: discord.Interaction):
-        if ADMIN_USER_ID != 0 and interaction.user.id != ADMIN_USER_ID:
-            await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
-            return
-        await interaction.response.send_modal(ApiKeyModal())
-
-    @bot.event
-    async def on_message(message: discord.Message):
-        if message.author.bot:
-            return
-
-        if isinstance(message.channel, discord.Thread):
-            thread_id = message.channel.id
-            with gemini_analyzer._lock:
-                session_exists = thread_id in gemini_analyzer.sessions
-
-            if session_exists:
-                async with message.channel.typing():
-                    reply_text = await asyncio.to_thread(
-                        gemini_analyzer.continue_coaching, thread_id, message.content
-                    )
-                    if len(reply_text) > 2000:
-                        for chunk in [reply_text[i:i + 1900] for i in range(0, len(reply_text), 1900)]:
-                            await message.reply(chunk)
-                    else:
-                        await message.reply(reply_text)
-                return
-
-        await bot.process_commands(message)
-
-    async def _get_rank_text(puuid: str) -> str:
-        try:
-            entries = await riot_client.get_league_entries(puuid)
-        except RiotAPIError:
-            return "조회 실패"
-        solo = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
-        if not solo:
-            return "언랭"
-        return f"{solo['tier']} {solo['rank']} {solo['leaguePoints']}LP ({solo['wins']}승 {solo['losses']}패)"
-
     @lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석하고 1:1 대화 스레드를 개설합니다.")
     @app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
     async def match_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
-        try:
-            await interaction.response.defer(thinking=True)
-        except discord.errors.NotFound:
-            return
+        # 3초 타임아웃 방지를 위해 최우선 실행
+        await interaction.response.defer(thinking=True)
 
         try:
             account = await riot_client.get_account_by_riot_id(game_name, tag_line)
@@ -253,7 +166,17 @@ def create_bot() -> commands.Bot:
         except RiotAPIError as e:
             await interaction.followup.send(f"⚠️ 라이엇 API 오류: {e.message}")
         except Exception as e:
-            raise e
+            await interaction.followup.send(f"⚠️ 처리 도중 오류가 발생했습니다: {e}")
+
+    async def _get_rank_text(puuid: str) -> str:
+        try:
+            entries = await riot_client.get_league_entries(puuid)
+        except RiotAPIError:
+            return "조회 실패"
+        solo = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
+        if not solo:
+            return "언랭"
+        return f"{solo['tier']} {solo['rank']} {solo['leaguePoints']}LP ({solo['wins']}승 {solo['losses']}패)"
 
     return bot
 
@@ -263,7 +186,7 @@ async def main():
         print("❌ DISCORD_BOT_TOKEN 환경 변수가 설정되지 않았습니다.", flush=True)
         return
 
-    retry_delay = 120  # 429 감지 시 기본 2분 대기
+    retry_delay = 120
     while True:
         current_bot = create_bot()
         try:
@@ -273,12 +196,12 @@ async def main():
         except discord.errors.HTTPException as e:
             if e.status in (429, 502, 504):
                 print(
-                    f"⚠️ Discord API HTTP {e.status} (Rate Limit / Cloudflare 차단) 감지. "
+                    f"⚠️ Discord API HTTP {e.status} (Cloudflare IP 차단) 감지. "
                     f"{retry_delay}초 동안 대기 후 새 세션으로 재시도합니다...",
                     flush=True,
                 )
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 600)  # 지연 시간을 최대 10분까지 늘림
+                retry_delay = min(retry_delay * 2, 600)
             else:
                 print(f"❌ Discord HTTP 오류 발생: {e}", flush=True)
                 await asyncio.sleep(30)
