@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from riot_client import RiotClient, RiotAPIError
 from gemini_analyzer import GeminiAnalyzer
 
-# --- Render 헬스체크 서버 ---
+# --- Render 헬스체크 웹서버 ---
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -50,14 +50,6 @@ SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "false").lower() == "true"
 riot_client = RiotClient(api_key=RIOT_KEY)
 gemini_analyzer = GeminiAnalyzer(api_key=GEMINI_KEY, model_name=MODEL_NAME)
 
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-lol_group = app_commands.Group(name="롤", description="LoL AI 코치 분석 명령어 모음")
-bot.tree.add_command(lol_group)
-
 
 def build_embed(title: str, description: str, color: discord.Color, rank_text: str | None = None) -> discord.Embed:
     if description is None:
@@ -74,195 +66,196 @@ def build_embed(title: str, description: str, color: discord.Color, rank_text: s
     return embed
 
 
-@bot.event
-async def on_ready():
-    print(f"=== {bot.user.name} 봇 준비 완료! ===", flush=True)
-    if SYNC_COMMANDS:
-        try:
-            synced = await bot.tree.sync()
-            print(f"등록된 슬래시 명령어 개수: {len(synced)}개", flush=True)
-        except Exception as e:
-            print(f"명령어 동기화 실패: {e}", flush=True)
-    else:
-        print("SYNC_COMMANDS=false → 이번 배포에서는 슬래시 명령어 동기화를 건너뜁니다.", flush=True)
+def create_bot() -> commands.Bot:
+    """닫힌 세션 재사용 오류를 방지하기 위해 봇 객체와 이벤트 핸들러를 새롭게 생성합니다."""
+    intents = discord.Intents.default()
+    intents.message_content = True
 
+    bot = commands.Bot(command_prefix="!", intents=intents)
+    lol_group = app_commands.Group(name="롤", description="LoL AI 코치 분석 명령어 모음")
+    bot.tree.add_command(lol_group)
 
-@bot.command(name="sync")
-@commands.is_owner()
-async def manual_sync(ctx: commands.Context):
-    """봇 소유자 전용: 슬래시 명령어를 수동으로 동기화합니다."""
-    synced = await bot.tree.sync()
-    await ctx.send(f"✅ {len(synced)}개 명령어 동기화 완료")
-
-
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    error_log = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    print(f"⚠️ 시스템 오류 감지:\n{error_log}", flush=True)
-
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message("⚠️ 처리 중 오류가 발생했습니다. 관리자에게 진단 보고서가 전송됩니다.", ephemeral=True)
+    @bot.event
+    async def on_ready():
+        print(f"=== {bot.user.name} 봇 준비 완료! ===", flush=True)
+        if SYNC_COMMANDS:
+            try:
+                synced = await bot.tree.sync()
+                print(f"등록된 슬래시 명령어 개수: {len(synced)}개", flush=True)
+            except Exception as e:
+                print(f"명령어 동기화 실패: {e}", flush=True)
         else:
-            await interaction.followup.send("⚠️ 처리 중 오류가 발생했습니다. 관리자에게 진단 보고서가 전송됩니다.", ephemeral=True)
-    except discord.errors.NotFound:
-        pass
+            print("SYNC_COMMANDS=false → 이번 배포에서는 슬래시 명령어 동기화를 건너뜁니다.", flush=True)
 
-    if ADMIN_USER_ID != 0:
+    @bot.command(name="sync")
+    @commands.is_owner()
+    async def manual_sync(ctx: commands.Context):
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ {len(synced)}개 명령어 동기화 완료")
+
+    @bot.tree.error
+    async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        error_log = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        print(f"⚠️ 시스템 오류 감지:\n{error_log}", flush=True)
+
         try:
-            admin = await bot.fetch_user(ADMIN_USER_ID)
-            ai_diagnosis = await asyncio.to_thread(gemini_analyzer.analyze_error, error_log)
-
-            report = (
-                f"🚨 **디스코드 봇 실행 오류 발생**\n\n"
-                f"**[에러 원본 로그]**\n```python\n{error_log[:1000]}\n```\n\n"
-                f"💡 **Gemini AI 자동 진단 & 해결책:**\n{ai_diagnosis}"
-            )
-            if len(report) > 2000:
-                for chunk in [report[i:i + 1900] for i in range(0, len(report), 1900)]:
-                    await admin.send(chunk)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("⚠️ 처리 중 오류가 발생했습니다.", ephemeral=True)
             else:
-                await admin.send(report)
-        except Exception as dm_err:
-            print(f"관리자 DM 발송 실패: {dm_err}", flush=True)
+                await interaction.followup.send("⚠️ 처리 중 오류가 발생했습니다.", ephemeral=True)
+        except discord.errors.NotFound:
+            pass
 
+        if ADMIN_USER_ID != 0:
+            try:
+                admin = await bot.fetch_user(ADMIN_USER_ID)
+                ai_diagnosis = await asyncio.to_thread(gemini_analyzer.analyze_error, error_log)
 
-class ApiKeyModal(discord.ui.Modal, title="라이엇 API 키 갱신"):
-    new_key = discord.ui.TextInput(
-        label="새 RIOT_API_KEY",
-        placeholder="RGAPI-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
-        style=discord.TextStyle.short,
-        required=True,
-    )
+                report = (
+                    f"🚨 **디스코드 봇 실행 오류 발생**\n\n"
+                    f"**[에러 원본 로그]**\n```python\n{error_log[:1000]}\n```\n\n"
+                    f"💡 **Gemini AI 자동 진단 & 해결책:**\n{ai_diagnosis}"
+                )
+                if len(report) > 2000:
+                    for chunk in [report[i:i + 1900] for i in range(0, len(report), 1900)]:
+                        await admin.send(chunk)
+                else:
+                    await admin.send(report)
+            except Exception as dm_err:
+                print(f"관리자 DM 발송 실패: {dm_err}", flush=True)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        key_value = str(self.new_key.value).strip()
-        riot_client.api_key = key_value
-        os.environ["RIOT_API_KEY"] = key_value
-        await interaction.response.send_message(
-            f"✅ 라이엇 API 키가 즉시 갱신되었습니다! (`{key_value[:10]}...`)\n"
-            "⚠️ 이 변경은 이 프로세스가 살아있는 동안만 유지됩니다. Render 재배포 시 이전 키로 "
-            "되돌아가니, Render 대시보드 Environment Variables의 `RIOT_API_KEY`도 함께 갱신해주세요.",
-            ephemeral=True,
+    class ApiKeyModal(discord.ui.Modal, title="라이엇 API 키 갱신"):
+        new_key = discord.ui.TextInput(
+            label="새 RIOT_API_KEY",
+            placeholder="RGAPI-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+            style=discord.TextStyle.short,
+            required=True,
         )
 
-
-@bot.tree.command(name="키갱신", description="[관리자 전용] 라이엇 API 키를 봇 재부팅 없이 즉시 갱신합니다.")
-async def update_api_key(interaction: discord.Interaction):
-    if ADMIN_USER_ID != 0 and interaction.user.id != ADMIN_USER_ID:
-        await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
-        return
-    await interaction.response.send_modal(ApiKeyModal())
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    if isinstance(message.channel, discord.Thread):
-        thread_id = message.channel.id
-        with gemini_analyzer._lock:
-            session_exists = thread_id in gemini_analyzer.sessions
-
-        if session_exists:
-            async with message.channel.typing():
-                reply_text = await asyncio.to_thread(
-                    gemini_analyzer.continue_coaching, thread_id, message.content
-                )
-                if len(reply_text) > 2000:
-                    for chunk in [reply_text[i:i + 1900] for i in range(0, len(reply_text), 1900)]:
-                        await message.reply(chunk)
-                else:
-                    await message.reply(reply_text)
-            return
-
-    await bot.process_commands(message)
-
-
-async def _get_rank_text(puuid: str) -> str:
-    try:
-        entries = await riot_client.get_league_entries(puuid)
-    except RiotAPIError:
-        return "조회 실패"
-    solo = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
-    if not solo:
-        return "언랭"
-    return f"{solo['tier']} {solo['rank']} {solo['leaguePoints']}LP ({solo['wins']}승 {solo['losses']}패)"
-
-
-@lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석하고 1:1 대화 스레드를 개설합니다.")
-@app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
-async def match_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
-    try:
-        await interaction.response.defer(thinking=True)
-    except discord.errors.NotFound:
-        return
-
-    try:
-        account = await riot_client.get_account_by_riot_id(game_name, tag_line)
-        puuid = account.get("puuid")
-        if not puuid:
-            await interaction.followup.send("❌ 소환사 정보를 찾을 수 없습니다.")
-            return
-
-        rank_text = await _get_rank_text(puuid)
-        match_ids = await riot_client.get_recent_matches(puuid, count=5)
-        if not match_ids:
-            await interaction.followup.send("⚠️ 최근 게임 기록이 없습니다.")
-            return
-
-        lines = []
-        for match_id in match_ids:
-            detail = await riot_client.get_match_detail(match_id)
-            p = next((pp for pp in detail["info"]["participants"] if pp.get("puuid") == puuid), None)
-            if not p:
-                continue
-            result = "승리" if p.get("win") else "패배"
-            cs = p.get("totalMinionsKilled", 0) + p.get("neutralMinionsKilled", 0)
-            lines.append(
-                f"- {p.get('championName', '미상')} ({p.get('teamPosition', '?')}): "
-                f"{p.get('kills', 0)}/{p.get('deaths', 0)}/{p.get('assists', 0)} KDA, "
-                f"딜량 {p.get('totalDamageDealtToChampions', 0):,}, CS {cs}, {result}"
+        async def on_submit(self, interaction: discord.Interaction):
+            key_value = str(self.new_key.value).strip()
+            riot_client.api_key = key_value
+            os.environ["RIOT_API_KEY"] = key_value
+            await interaction.response.send_message(
+                f"✅ 라이엇 API 키가 즉시 갱신되었습니다! (`{key_value[:10]}...`)",
+                ephemeral=True,
             )
 
-        summary_text = f"현재 솔로랭크 티어: {rank_text}\n\n최근 {len(lines)}경기 기록:\n" + "\n".join(lines)
+    @bot.tree.command(name="키갱신", description="[관리자 전용] 라이엇 API 키를 봇 재부팅 없이 즉시 갱신합니다.")
+    async def update_api_key(interaction: discord.Interaction):
+        if ADMIN_USER_ID != 0 and interaction.user.id != ADMIN_USER_ID:
+            await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ApiKeyModal())
 
-        raw_res = await asyncio.to_thread(
-            gemini_analyzer.analyze_match_history, f"{game_name}#{tag_line}", summary_text
-        )
-        analysis_res = str(raw_res) if raw_res is not None else "분석 결과를 생성하지 못했습니다."
+    @bot.event
+    async def on_message(message: discord.Message):
+        if message.author.bot:
+            return
 
-        embed = build_embed(
-            title=f"📊 {game_name}#{tag_line} AI 전적 분석 결과",
-            description=analysis_res,
-            color=discord.Color.blue(),
-            rank_text=rank_text,
-        )
+        if isinstance(message.channel, discord.Thread):
+            thread_id = message.channel.id
+            with gemini_analyzer._lock:
+                session_exists = thread_id in gemini_analyzer.sessions
 
-        msg = await interaction.followup.send(embed=embed, wait=True)
+            if session_exists:
+                async with message.channel.typing():
+                    reply_text = await asyncio.to_thread(
+                        gemini_analyzer.continue_coaching, thread_id, message.content
+                    )
+                    if len(reply_text) > 2000:
+                        for chunk in [reply_text[i:i + 1900] for i in range(0, len(reply_text), 1900)]:
+                            await message.reply(chunk)
+                    else:
+                        await message.reply(reply_text)
+                return
 
-        thread = await msg.create_thread(
-            name=f"💬 {game_name} AI 코치 1:1 피드백 채널",
-            auto_archive_duration=60,
-        )
+        await bot.process_commands(message)
 
-        await asyncio.to_thread(
-            gemini_analyzer.start_coaching_session,
-            session_id=thread.id,
-            summoner_name=f"{game_name}#{tag_line}",
-            match_summary=summary_text,
-            initial_analysis=analysis_res,
-        )
+    async def _get_rank_text(puuid: str) -> str:
+        try:
+            entries = await riot_client.get_league_entries(puuid)
+        except RiotAPIError:
+            return "조회 실패"
+        solo = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
+        if not solo:
+            return "언랭"
+        return f"{solo['tier']} {solo['rank']} {solo['leaguePoints']}LP ({solo['wins']}승 {solo['losses']}패)"
 
-        await thread.send(
-            f"👋 안녕하세요 **{game_name}**님! 전적 피드백 결과에 대해 궁금한 점이 있다면 무엇이든 편하게 물어보세요."
-        )
+    @lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석하고 1:1 대화 스레드를 개설합니다.")
+    @app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
+    async def match_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
+        try:
+            await interaction.response.defer(thinking=True)
+        except discord.errors.NotFound:
+            return
 
-    except RiotAPIError as e:
-        await interaction.followup.send(f"⚠️ 라이엇 API 오류: {e.message}")
-    except Exception as e:
-        raise e
+        try:
+            account = await riot_client.get_account_by_riot_id(game_name, tag_line)
+            puuid = account.get("puuid")
+            if not puuid:
+                await interaction.followup.send("❌ 소환사 정보를 찾을 수 없습니다.")
+                return
+
+            rank_text = await _get_rank_text(puuid)
+            match_ids = await riot_client.get_recent_matches(puuid, count=5)
+            if not match_ids:
+                await interaction.followup.send("⚠️ 최근 게임 기록이 없습니다.")
+                return
+
+            lines = []
+            for match_id in match_ids:
+                detail = await riot_client.get_match_detail(match_id)
+                p = next((pp for pp in detail["info"]["participants"] if pp.get("puuid") == puuid), None)
+                if not p:
+                    continue
+                result = "승리" if p.get("win") else "패배"
+                cs = p.get("totalMinionsKilled", 0) + p.get("neutralMinionsKilled", 0)
+                lines.append(
+                    f"- {p.get('championName', '미상')} ({p.get('teamPosition', '?')}): "
+                    f"{p.get('kills', 0)}/{p.get('deaths', 0)}/{p.get('assists', 0)} KDA, "
+                    f"딜량 {p.get('totalDamageDealtToChampions', 0):,}, CS {cs}, {result}"
+                )
+
+            summary_text = f"현재 솔로랭크 티어: {rank_text}\n\n최근 {len(lines)}경기 기록:\n" + "\n".join(lines)
+
+            raw_res = await asyncio.to_thread(
+                gemini_analyzer.analyze_match_history, f"{game_name}#{tag_line}", summary_text
+            )
+            analysis_res = str(raw_res) if raw_res is not None else "분석 결과를 생성하지 못했습니다."
+
+            embed = build_embed(
+                title=f"📊 {game_name}#{tag_line} AI 전적 분석 결과",
+                description=analysis_res,
+                color=discord.Color.blue(),
+                rank_text=rank_text,
+            )
+
+            msg = await interaction.followup.send(embed=embed, wait=True)
+
+            thread = await msg.create_thread(
+                name=f"💬 {game_name} AI 코치 1:1 피드백 채널",
+                auto_archive_duration=60,
+            )
+
+            await asyncio.to_thread(
+                gemini_analyzer.start_coaching_session,
+                session_id=thread.id,
+                summoner_name=f"{game_name}#{tag_line}",
+                match_summary=summary_text,
+                initial_analysis=analysis_res,
+            )
+
+            await thread.send(
+                f"👋 안녕하세요 **{game_name}**님! 전적 피드백 결과에 대해 궁금한 점이 있다면 무엇이든 편하게 물어보세요."
+            )
+
+        except RiotAPIError as e:
+            await interaction.followup.send(f"⚠️ 라이엇 API 오류: {e.message}")
+        except Exception as e:
+            raise e
+
+    return bot
 
 
 async def main():
@@ -270,21 +263,22 @@ async def main():
         print("❌ DISCORD_BOT_TOKEN 환경 변수가 설정되지 않았습니다.", flush=True)
         return
 
-    retry_delay = 60
+    retry_delay = 120  # 429 감지 시 기본 2분 대기
     while True:
+        current_bot = create_bot()
         try:
-            async with bot:
-                await bot.start(DISCORD_TOKEN)
+            async with current_bot:
+                await current_bot.start(DISCORD_TOKEN)
             break
         except discord.errors.HTTPException as e:
             if e.status in (429, 502, 504):
                 print(
                     f"⚠️ Discord API HTTP {e.status} (Rate Limit / Cloudflare 차단) 감지. "
-                    f"{retry_delay}초 동안 대기 후 재시도합니다...",
+                    f"{retry_delay}초 동안 대기 후 새 세션으로 재시도합니다...",
                     flush=True,
                 )
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 600)  # 최대 10분까지 지연 증가
+                retry_delay = min(retry_delay * 2, 600)  # 지연 시간을 최대 10분까지 늘림
             else:
                 print(f"❌ Discord HTTP 오류 발생: {e}", flush=True)
                 await asyncio.sleep(30)
