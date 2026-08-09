@@ -1,4 +1,3 @@
-# bot.py
 import asyncio
 import os
 import threading
@@ -45,9 +44,7 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 RIOT_KEY = os.getenv("RIOT_API_KEY")
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
-# 📌 본인의 디스코드 유저 ID (숫자) - Render 환경변수에서 불러옴
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
-
 SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "false").lower() == "true"
 
 riot_client = RiotClient(api_key=RIOT_KEY)
@@ -93,12 +90,11 @@ async def on_ready():
 @bot.command(name="sync")
 @commands.is_owner()
 async def manual_sync(ctx: commands.Context):
-    """봇 소유자 전용: 슬래시 명령어를 수동으로 동기화합니다. (디스코드에서 '!sync' 입력)"""
+    """봇 소유자 전용: 슬래시 명령어를 수동으로 동기화합니다."""
     synced = await bot.tree.sync()
     await ctx.send(f"✅ {len(synced)}개 명령어 동기화 완료")
 
 
-# 📌 1. AI 디버깅 시스템: 슬래시 명령어 에러 발생 시 관리자 DM으로 진단 리포트 발송
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     error_log = "".join(traceback.format_exception(type(error), error, error.__traceback__))
@@ -110,12 +106,11 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         else:
             await interaction.followup.send("⚠️ 처리 중 오류가 발생했습니다. 관리자에게 진단 보고서가 전송됩니다.", ephemeral=True)
     except discord.errors.NotFound:
-        pass  # interaction 자체가 이미 만료된 경우 (3초 초과 등) - 사용자 안내는 포기하고 DM 리포트는 계속 시도
+        pass
 
     if ADMIN_USER_ID != 0:
         try:
             admin = await bot.fetch_user(ADMIN_USER_ID)
-            # 🔓 asyncio.to_thread로 동기 I/O 블록 방지 (Gemini 호출 포함)
             ai_diagnosis = await asyncio.to_thread(gemini_analyzer.analyze_error, error_log)
 
             report = (
@@ -132,7 +127,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             print(f"관리자 DM 발송 실패: {dm_err}", flush=True)
 
 
-# 📌 2. 관리자 전용 24시간 라이엇 API 키 즉시 갱신 명령어
 class ApiKeyModal(discord.ui.Modal, title="라이엇 API 키 갱신"):
     new_key = discord.ui.TextInput(
         label="새 RIOT_API_KEY",
@@ -161,7 +155,6 @@ async def update_api_key(interaction: discord.Interaction):
     await interaction.response.send_modal(ApiKeyModal())
 
 
-# --- 스레드 내부 후속 채팅 자동 답변 리스너 ---
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -169,13 +162,11 @@ async def on_message(message: discord.Message):
 
     if isinstance(message.channel, discord.Thread):
         thread_id = message.channel.id
-        # 세션 존재 여부를 Lock 안에서 안전하게 확인
         with gemini_analyzer._lock:
             session_exists = thread_id in gemini_analyzer.sessions
 
         if session_exists:
             async with message.channel.typing():
-                # 🔓 asyncio.to_thread로 동기 I/O 블록 방지 (Gemini 호출 포함)
                 reply_text = await asyncio.to_thread(
                     gemini_analyzer.continue_coaching, thread_id, message.content
                 )
@@ -200,14 +191,13 @@ async def _get_rank_text(puuid: str) -> str:
     return f"{solo['tier']} {solo['rank']} {solo['leaguePoints']}LP ({solo['wins']}승 {solo['losses']}패)"
 
 
-# --- /롤 전적 분석 및 대화 스레드 자동 개설 ---
 @lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석하고 1:1 대화 스레드를 개설합니다.")
 @app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
 async def match_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
     try:
         await interaction.response.defer(thinking=True)
     except discord.errors.NotFound:
-        return  # interaction이 3초 내 처리되지 못해 이미 만료됨
+        return
 
     try:
         account = await riot_client.get_account_by_riot_id(game_name, tag_line)
@@ -238,7 +228,6 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
 
         summary_text = f"현재 솔로랭크 티어: {rank_text}\n\n최근 {len(lines)}경기 기록:\n" + "\n".join(lines)
 
-        # 🔓 asyncio.to_thread로 동기 I/O 블록 방지 (Gemini 호출 포함)
         raw_res = await asyncio.to_thread(
             gemini_analyzer.analyze_match_history, f"{game_name}#{tag_line}", summary_text
         )
@@ -258,7 +247,6 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
             auto_archive_duration=60,
         )
 
-        # 🔓 asyncio.to_thread로 동기 I/O 블록 방지 (Gemini 세션 생성 포함)
         await asyncio.to_thread(
             gemini_analyzer.start_coaching_session,
             session_id=thread.id,
@@ -274,9 +262,36 @@ async def match_analysis(interaction: discord.Interaction, game_name: str, tag_l
     except RiotAPIError as e:
         await interaction.followup.send(f"⚠️ 라이엇 API 오류: {e.message}")
     except Exception as e:
-        # 여기서 잡히지 않으면 @bot.tree.error로 전달됨
         raise e
 
 
+async def main():
+    if not DISCORD_TOKEN:
+        print("❌ DISCORD_BOT_TOKEN 환경 변수가 설정되지 않았습니다.", flush=True)
+        return
+
+    retry_delay = 60
+    while True:
+        try:
+            async with bot:
+                await bot.start(DISCORD_TOKEN)
+            break
+        except discord.errors.HTTPException as e:
+            if e.status in (429, 502, 504):
+                print(
+                    f"⚠️ Discord API HTTP {e.status} (Rate Limit / Cloudflare 차단) 감지. "
+                    f"{retry_delay}초 동안 대기 후 재시도합니다...",
+                    flush=True,
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 600)  # 최대 10분까지 지연 증가
+            else:
+                print(f"❌ Discord HTTP 오류 발생: {e}", flush=True)
+                await asyncio.sleep(30)
+        except Exception as e:
+            print(f"❌ 봇 실행 중 예외 발생: {e}", flush=True)
+            await asyncio.sleep(30)
+
+
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    asyncio.run(main())
