@@ -12,6 +12,15 @@ from dotenv import load_dotenv
 from riot_client import RiotClient, RiotAPIError
 from gemini_analyzer import GeminiAnalyzer
 
+# 큐 ID 매핑 (Riot API queueId -> 큐 이름)
+QUEUE_TYPES = {
+    420: "솔랭",
+    440: "자랭",
+    450: "칼바람",
+    400: "일반",
+    490: "빠른대전",
+}
+
 # --- Render 헬스체크 웹서버 ---
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -62,7 +71,7 @@ def build_embed(title: str, description: str, color: discord.Color, rank_text: s
 
     embed = discord.Embed(title=str(title), description=description, color=color)
     if rank_text:
-        embed.add_field(name="🏆 현재 솔로랭크", value=str(rank_text), inline=False)
+        embed.add_field(name="🏆 현재 티어 현황", value=str(rank_text), inline=False)
     return embed
 
 
@@ -97,10 +106,22 @@ def create_bot() -> commands.Bot:
         except discord.errors.NotFound:
             pass
 
+    async def _get_rank_text(puuid: str) -> str:
+        try:
+            entries = await riot_client.get_league_entries(puuid)
+        except RiotAPIError:
+            return "조회 실패"
+        solo = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
+        flex = next((e for e in entries if e.get("queueType") == "RANKED_FLEX_SR"), None)
+
+        solo_str = f"{solo['tier']} {solo['rank']} ({solo['leaguePoints']}LP, {solo['wins']}승 {solo['losses']}패)" if solo else "언랭"
+        flex_str = f"{flex['tier']} {flex['rank']} ({flex['leaguePoints']}LP, {flex['wins']}승 {flex['losses']}패)" if flex else "언랭"
+
+        return f"솔로랭크: {solo_str} | 자유랭크: {flex_str}"
+
     @lol_group.command(name="전적", description="소환사의 최근 전적 데이터를 AI가 분석하고 1:1 대화 스레드를 개설합니다.")
     @app_commands.describe(game_name="소환사 이름", tag_line="태그 (예: KR1)")
     async def match_analysis(interaction: discord.Interaction, game_name: str, tag_line: str):
-        # 3초 타임아웃 방지를 위해 최우선 실행
         await interaction.response.defer(thinking=True)
 
         try:
@@ -119,18 +140,21 @@ def create_bot() -> commands.Bot:
             lines = []
             for match_id in match_ids:
                 detail = await riot_client.get_match_detail(match_id)
+                queue_id = detail["info"].get("queueId", 0)
+                q_name = QUEUE_TYPES.get(queue_id, "기타")
+
                 p = next((pp for pp in detail["info"]["participants"] if pp.get("puuid") == puuid), None)
                 if not p:
                     continue
                 result = "승리" if p.get("win") else "패배"
                 cs = p.get("totalMinionsKilled", 0) + p.get("neutralMinionsKilled", 0)
                 lines.append(
-                    f"- {p.get('championName', '미상')} ({p.get('teamPosition', '?')}): "
+                    f"- [{q_name}] {p.get('championName', '미상')} ({p.get('teamPosition', '?')}): "
                     f"{p.get('kills', 0)}/{p.get('deaths', 0)}/{p.get('assists', 0)} KDA, "
                     f"딜량 {p.get('totalDamageDealtToChampions', 0):,}, CS {cs}, {result}"
                 )
 
-            summary_text = f"현재 솔로랭크 티어: {rank_text}\n\n최근 {len(lines)}경기 기록:\n" + "\n".join(lines)
+            summary_text = f"현재 티어 현황: {rank_text}\n\n최근 {len(lines)}경기 기록:\n" + "\n".join(lines)
 
             raw_res = await asyncio.to_thread(
                 gemini_analyzer.analyze_match_history, f"{game_name}#{tag_line}", summary_text
@@ -146,37 +170,79 @@ def create_bot() -> commands.Bot:
 
             msg = await interaction.followup.send(embed=embed, wait=True)
 
-            thread = await msg.create_thread(
-                name=f"💬 {game_name} AI 코치 1:1 피드백 채널",
-                auto_archive_duration=60,
-            )
+            # 스레드 생성 방어 로직 (서버 채널이고, 현재 위치가 스레드가 아닐 때만 생성)
+            if interaction.guild and hasattr(msg, "create_thread") and not isinstance(interaction.channel, discord.Thread):
+                try:
+                    thread = await msg.create_thread(
+                        name=f"💬 {game_name} AI 코치 1:1 피드백 채널",
+                        auto_archive_duration=60,
+                    )
 
-            await asyncio.to_thread(
-                gemini_analyzer.start_coaching_session,
-                session_id=thread.id,
-                summoner_name=f"{game_name}#{tag_line}",
-                match_summary=summary_text,
-                initial_analysis=analysis_res,
-            )
+                    await asyncio.to_thread(
+                        gemini_analyzer.start_coaching_session,
+                        session_id=thread.id,
+                        summoner_name=f"{game_name}#{tag_line}",
+                        match_summary=summary_text,
+                        initial_analysis=analysis_res,
+                    )
 
-            await thread.send(
-                f"👋 안녕하세요 **{game_name}**님! 전적 피드백 결과에 대해 궁금한 점이 있다면 무엇이든 편하게 물어보세요."
-            )
+                    await thread.send(
+                        f"👋 안녕하세요 **{game_name}**님! 전적 피드백 결과에 대해 궁금한 점이 있다면 무엇이든 편하게 물어보세요."
+                    )
+                except Exception as thread_err:
+                    print(f"⚠️ 스레드 생성 실패: {thread_err}", flush=True)
+            else:
+                # 스레드를 만들 수 없는 채널 환경에서는 해당 채널 ID로 세션 개설
+                await asyncio.to_thread(
+                    gemini_analyzer.start_coaching_session,
+                    session_id=interaction.channel_id,
+                    summoner_name=f"{game_name}#{tag_line}",
+                    match_summary=summary_text,
+                    initial_analysis=analysis_res,
+                )
 
         except RiotAPIError as e:
             await interaction.followup.send(f"⚠️ 라이엇 API 오류: {e.message}")
         except Exception as e:
             await interaction.followup.send(f"⚠️ 처리 도중 오류가 발생했습니다: {e}")
 
-    async def _get_rank_text(puuid: str) -> str:
-        try:
-            entries = await riot_client.get_league_entries(puuid)
-        except RiotAPIError:
-            return "조회 실패"
-        solo = next((e for e in entries if e.get("queueType") == "RANKED_SOLO_5x5"), None)
-        if not solo:
-            return "언랭"
-        return f"{solo['tier']} {solo['rank']} {solo['leaguePoints']}LP ({solo['wins']}승 {solo['losses']}패)"
+    @bot.event
+    async def on_message(message: discord.Message):
+        # 봇 메시지 무시
+        if message.author.bot:
+            return
+
+        session_id = message.channel.id
+
+        # 1. 활성화된 코칭 세션(스레드 또는 채널)이 존재하는 경우 연속 대화 처리
+        if hasattr(gemini_analyzer, "has_session") and gemini_analyzer.has_session(session_id):
+            async with message.channel.typing():
+                try:
+                    reply_text = await asyncio.to_thread(
+                        gemini_analyzer.continue_coaching_session,
+                        session_id=session_id,
+                        user_message=message.content,
+                    )
+                    await message.reply(reply_text)
+                except Exception as e:
+                    await message.reply(f"⚠️ 답변 생성 중 오류가 발생했습니다: {e}")
+
+        # 2. 봇을 @멘션하여 롤 관련 질문을 한 경우
+        elif bot.user.mentioned_in(message) and not message.mention_everyone:
+            clean_content = message.content.replace(f"<@{bot.user.id}>", "").strip()
+            if clean_content:
+                async with message.channel.typing():
+                    try:
+                        reply_text = await asyncio.to_thread(
+                            gemini_analyzer.continue_coaching_session,
+                            session_id=session_id,
+                            user_message=clean_content,
+                        )
+                        await message.reply(reply_text)
+                    except Exception as e:
+                        await message.reply(f"⚠️ 답변 생성 중 오류가 발생했습니다: {e}")
+
+        await bot.process_commands(message)
 
     return bot
 
