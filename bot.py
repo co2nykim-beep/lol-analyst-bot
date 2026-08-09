@@ -51,6 +51,8 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 RIOT_KEY = os.getenv("RIOT_API_KEY")
+
+# 요구사항 반영: 기본 모델을 gemini-3.6-flash로 지정
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
@@ -148,12 +150,9 @@ def create_bot() -> commands.Bot:
             target_queue_id = int(queue_type.value)
             target_queue_name = queue_type.name
 
-            # 1. 큐 타입 지정 및 판수 10판으로 변경
-            # Note: riot_client.get_recent_matches 메서드가 queue 인자를 받을 수 있도록 권장됩니다.
             try:
                 match_ids = await riot_client.get_recent_matches(puuid, count=10, queue=target_queue_id)
             except TypeError:
-                # 만약 riot_client가 queue 파라미터를 안 받는 기존 구조일 경우 대비한 폴백
                 match_ids = await riot_client.get_recent_matches(puuid, count=20)
 
             if not match_ids:
@@ -165,7 +164,6 @@ def create_bot() -> commands.Bot:
                 detail = await riot_client.get_match_detail(match_id)
                 q_id = detail["info"].get("queueId", 0)
                 
-                # 선택한 큐만 필터링 (Riot API 단에서 필터링 안 되었을 경우 대비)
                 if q_id != target_queue_id:
                     continue
 
@@ -208,9 +206,8 @@ def create_bot() -> commands.Bot:
 
             msg = await interaction.followup.send(embed=embed, wait=True)
 
-            # 스레드 생성 및 세션 등록
             target_session_id = None
-            if interaction.guild and hasattr(msg, "create_thread") and not isinstance(interaction.channel, discord.Thread):
+            if interaction.guild and hasattr(msg, "create_thread") and isinstance(interaction.channel, (discord.TextChannel, discord.ForumChannel)):
                 try:
                     thread = await msg.create_thread(
                         name=f"💬 {game_name} [{target_queue_name}] AI 코치 1:1 채널",
@@ -226,7 +223,6 @@ def create_bot() -> commands.Bot:
             else:
                 target_session_id = interaction.channel_id
 
-            # 코칭 세션 생성
             await asyncio.to_thread(
                 gemini_analyzer.start_coaching_session,
                 session_id=target_session_id,
@@ -242,21 +238,18 @@ def create_bot() -> commands.Bot:
 
     @bot.event
     async def on_message(message: discord.Message):
-        # 봇 자신의 메시지 또는 타 봇 메시지 무시
         if message.author.bot:
             return
 
         channel = message.channel
         session_id = channel.id
 
-        # 1. 챗봇형 대화 감지 조건:
-        # - 해당 채널/스레드 ID로 등록된 세션이 있거나
-        # - 봇이 생성한 스레드 내에서 메시지가 작성된 경우
         is_coaching_thread = isinstance(channel, discord.Thread) and (
             channel.owner_id == bot.user.id or "AI 코치" in channel.name
         )
-        has_active_session = hasattr(gemini_analyzer, "has_session") and gemini_analyzer.has_session(session_id)
+        has_active_session = gemini_analyzer.has_session(session_id)
 
+        # 1. 기존 코칭 세션 내 대화
         if is_coaching_thread or has_active_session:
             async with channel.typing():
                 try:
@@ -270,20 +263,20 @@ def create_bot() -> commands.Bot:
                     await message.reply(f"⚠️ 답변 생성 중 오류가 발생했습니다: {e}")
             return
 
-        # 2. 일반 채널에서 봇을 Direct 멘션한 경우
+        # 2. 일반 채널 direct 멘션 질의
         if bot.user.mentioned_in(message) and not message.mention_everyone:
             clean_content = message.content.replace(f"<@{bot.user.id}>", "").strip()
             if clean_content:
                 async with channel.typing():
                     try:
                         reply_text = await asyncio.to_thread(
-                            gemini_analyzer.continue_coaching_session,
-                            session_id=session_id,
-                            user_message=clean_content,
+                            gemini_analyzer.ask_general,
+                            question=clean_content,
                         )
                         await message.reply(reply_text)
                     except Exception as e:
                         await message.reply(f"⚠️ 답변 생성 중 오류가 발생했습니다: {e}")
+            return
 
         await bot.process_commands(message)
 
