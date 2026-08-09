@@ -16,6 +16,7 @@ def clean_latex(text: str) -> str:
 
 
 class GeminiAnalyzer:
+    # 요구사항 반영: 기본 모델을 gemini-3.6-flash로 지정
     def __init__(self, api_key: str, model_name: str = "gemini-3.6-flash"):
         self.api_key = api_key
         self.model_name = model_name or "gemini-3.6-flash"
@@ -47,6 +48,18 @@ class GeminiAnalyzer:
 3. **AI 추천 티어업 팁**: 승률을 올리기 위한 핵심 조언 2~3가지
 
 - LaTeX 수식 문법 사용 금지.
+"""
+        return self._generate(prompt)
+
+    def ask_general(self, question: str) -> str:
+        """일반 멘션 질문 처리기"""
+        prompt = f"""
+너는 리그 오브 레전드(LoL) 전문 AI 코치야. 소환사가 물어보는 롤 메타, 조합 상성, 라인전, 아이템 빌드 질문에 대해 핵심 위주로 명확하게 답변해줘.
+
+[사용자 질문]: {question}
+
+- 디스코드용 마크다운 형식 사용.
+- LaTeX 수식 표현 금지.
 """
         return self._generate(prompt)
 
@@ -107,21 +120,30 @@ class GeminiAnalyzer:
         except Exception as e:
             print(f"[GeminiAnalyzer] 코칭 세션 생성 실패: {e}", flush=True)
 
-    def continue_coaching(self, session_id, user_message: str) -> str:
+    def has_session(self, session_id) -> bool:
+        """bot.py 호환성을 위한 세션 존재 여부 확인 메서드 추가"""
+        with self._lock:
+            return session_id in self.sessions
+
+    def continue_coaching_session(self, session_id, user_message: str) -> str:
+        """bot.py 호출 메서드명과 일치시킴"""
         with self._lock:
             chat = self.sessions.get(session_id)
 
         if chat is None:
-            return (
-                "⚠️ 대화 세션이 만료되었습니다 (2시간 미사용 시 자동 정리).\n"
-                "다시 피드백을 받고 싶다면 `/롤 전적`을 다시 실행해주세요!"
-            )
+            # 세션 만료 시 일반 질의응답으로 자연스럽게 전환
+            return self.ask_general(user_message)
+
         try:
             response = chat.send_message(user_message)
             return clean_latex((response.text or "").strip())
         except Exception as e:
             print(f"[GeminiAnalyzer] 코칭 대화 실패: {e}", flush=True)
             return f"⚠️ 답변 생성에 실패했습니다: {e}"
+
+    # 하위 호환용 래퍼 메서드
+    def continue_coaching(self, session_id, user_message: str) -> str:
+        return self.continue_coaching_session(session_id, user_message)
 
     def analyze_error(self, error_log: str) -> str:
         prompt = f"""
