@@ -61,11 +61,20 @@ class RiotClient:
                 return []
             raise
 
-    async def get_recent_matches(self, puuid: str, count: int = 5):
+    async def get_recent_matches(self, puuid: str, count: int = 10, queue: int | None = None):
+        """
+        소환사의 최근 매치 ID 목록을 가져옵니다.
+        :param puuid: 소환사 고유 PUUID
+        :param count: 조회할 매치 수 (기본값 10판)
+        :param queue: Riot Queue ID (예: 420 = 솔로랭크, 440 = 자유랭크)
+        """
         url = (
             f"https://asia.api.riotgames.com/lol/match/v5/matches/by-puuid/"
             f"{puuid}/ids?start=0&count={count}"
         )
+        if queue is not None:
+            url += f"&queue={queue}"
+            
         return await self._get(url)
 
     async def get_match_detail(self, match_id: str):
