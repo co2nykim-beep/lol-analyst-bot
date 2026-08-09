@@ -1,18 +1,18 @@
 """
-Gemini 3.6 Flash 분석기 (수정판)
+Gemini 3.6 Flash 분석기 (수정판 v3 - 스레드 안전성 + 타임아웃 처리)
 
-원본 대비 수정 사항:
-1. [버그 수정] response.text가 None일 때(세이프티 차단 등) response.text.strip()에서
-   AttributeError로 죽던 문제 -> (response.text or "")로 방어.
-2. [구조 변경] analyze_ingame()에서 vs_champ(상대 라이너 챔피언) 파라미터를 제거했습니다.
-   Spectator API는 라인/포지션 정보를 주지 않기 때문에 "상대 라이너가 누구인지"를
-   신뢰성 있게 계산할 방법이 없습니다 (기존 코드는 이 자리에 "상대 라이너"라는
-   문자열을 그대로 하드코딩해서 넣고 있었습니다 - 사실상 빈 분석). 대신 확실하게
-   구할 수 있는 "전체 팀 조합"을 기준으로 분석하도록 프롬프트를 다시 짰습니다.
+실전 운영 문제 해결:
+1. [추가] threading.Lock으로 TTLCache 동시성 보호 (race condition 방지)
+2. [변경] continue_coaching()에서 세션 만료 감지 시 사용자에게 명확한 안내 메시지 반환
+3. [설명] start_coaching_session()은 여전히 동기이지만, bot.py에서 asyncio.to_thread로
+   감싸서 메인 이벤트 루프 차단을 방지합니다.
 """
 import re
+import threading
 
+from cachetools import TTLCache
 from google import genai
+from google.genai import types
 
 
 def clean_latex(text: str) -> str:
@@ -29,15 +29,18 @@ class GeminiAnalyzer:
         self.api_key = api_key
         self.model_name = model_name or "gemini-3.6-flash"
         self.client = genai.Client(api_key=api_key)
+        # 스레드 ID -> Chat 세션. 2시간 미사용 시 자동 만료.
+        self.sessions: TTLCache = TTLCache(maxsize=500, ttl=7200)
+        # 🔒 TTLCache는 스레드 세이프하지 않으므로 Lock으로 보호
+        self._lock = threading.Lock()
 
     def _generate(self, prompt: str) -> str:
-        """Gemini API 호출 및 응답 처리"""
+        """Gemini API 호출 및 응답 처리 (단발성 요청용)"""
         try:
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
             )
-            # 수정: response.text가 None일 수 있어 방어 처리 (세이프티 차단 등)
             return clean_latex((response.text or "").strip())
         except Exception as e:
             print(f"[GeminiAnalyzer] 생성 실패: {e}", flush=True)
@@ -94,5 +97,74 @@ class GeminiAnalyzer:
 
 - LaTeX 수식 표현 금지.
 - 디스코드용 마크다운 형식 사용.
+"""
+        return self._generate(prompt)
+
+    # ---- /롤 전적 스레드에서 이어지는 1:1 코칭 대화 ----
+    def start_coaching_session(
+        self, session_id, summoner_name: str, match_summary: str, initial_analysis: str
+    ):
+        """
+        전적 분석 스레드가 열릴 때 호출. Gemini 멀티턴 채팅 세션을 만들어 저장합니다.
+        
+        ⚠️ 주의: 이 메서드는 동기식(sync)이므로 네트워크 I/O 블록이 발생합니다.
+        bot.py에서 반드시 asyncio.to_thread()로 감싸서 호출하세요.
+        """
+        system_instruction = (
+            f"너는 리그 오브 레전드 AI 코치야. 지금 '{summoner_name}' 소환사와 "
+            "디스코드 스레드에서 방금 보낸 전적 분석에 대해 1:1로 대화하고 있어.\n\n"
+            f"[분석 대상 전적 데이터]\n{match_summary}\n\n"
+            f"[방금 사용자에게 보여준 최초 분석]\n{initial_analysis}\n\n"
+            "이후 사용자의 후속 질문에는 위 데이터를 근거로 짧고 실전적으로 답변해. "
+            "LaTeX 수식 표현은 쓰지 마."
+        )
+        try:
+            chat = self.client.chats.create(
+                model=self.model_name,
+                config=types.GenerateContentConfig(system_instruction=system_instruction),
+            )
+            # 🔒 Lock으로 sessions 쓰기 보호
+            with self._lock:
+                self.sessions[session_id] = chat
+            print(f"[GeminiAnalyzer] 코칭 세션 생성 완료: thread_id={session_id}", flush=True)
+        except Exception as e:
+            print(f"[GeminiAnalyzer] 코칭 세션 생성 실패: {e}", flush=True)
+
+    def continue_coaching(self, session_id, user_message: str) -> str:
+        """
+        코칭 스레드에서 사용자가 후속 메시지를 보낼 때 호출.
+        
+        ⚠️ 주의: 이 메서드는 동기식(sync)이므로 네트워크 I/O 블록이 발생합니다.
+        bot.py의 on_message에서 반드시 asyncio.to_thread()로 감싸서 호출하세요.
+        """
+        # 🔒 Lock으로 sessions 읽기 보호
+        with self._lock:
+            chat = self.sessions.get(session_id)
+        
+        if chat is None:
+            return (
+                "⚠️ 대화 세션이 만료되었습니다 (2시간 미사용 시 자동 정리).\n"
+                "다시 피드백을 받고 싶다면 `/롤 전적`을 다시 실행해주세요!"
+            )
+        try:
+            response = chat.send_message(user_message)
+            return clean_latex((response.text or "").strip())
+        except Exception as e:
+            print(f"[GeminiAnalyzer] 코칭 대화 실패: {e}", flush=True)
+            return f"⚠️ 답변 생성에 실패했습니다: {e}"
+
+    # ---- 에러 트레이스백 AI 진단 ----
+    def analyze_error(self, error_log: str) -> str:
+        """@bot.tree.error에서 예외 발생 시 관리자 DM용 AI 진단을 생성합니다."""
+        prompt = f"""
+너는 파이썬(discord.py) 전문 디버깅 어시스턴트야. 아래는 실제 발생한 예외 트레이스백이야.
+
+[트레이스백]
+{error_log[:3000]}
+
+다음을 마크다운으로 간결하게 작성해:
+1. **원인**: 어떤 코드/줄에서 왜 발생했는지 1~2문장
+2. **해결 방법**: 구체적으로 어떤 코드를 어떻게 고쳐야 하는지
+3. **재발 방지 팁**: 비슷한 에러를 막을 수 있는 팁 (있다면)
 """
         return self._generate(prompt)
