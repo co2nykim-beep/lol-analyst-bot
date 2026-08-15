@@ -433,48 +433,59 @@ class RiotClient:
         }
 
     @staticmethod
-    def _select_notable_events(events: list[dict[str, Any]], max_events: int = 35) -> list[dict[str, Any]]:
-        """중요도와 게임 시간대를 함께 고려해 Gemini에 전달할 사건을 선별한다.
+    def _phase_from_timestamp(timestamp: int) -> str:
+        """경기 시간을 초반·중반·후반의 고정 코칭 구간으로 분류한다."""
+        if timestamp < 10 * 60_000:
+            return "early"
+        if timestamp < 25 * 60_000:
+            return "mid"
+        return "late"
 
-        단순한 시간순 절삭은 장기 게임의 후반 오브젝트·결정적 사망을 잃게 된다. 이 선택기는
-        사망과 팀 오브젝트를 우선하고, 초반·중반·후반의 대표 사건을 먼저 확보한 뒤 남은
-        용량을 중요도 순으로 채운다.
-        """
-        if len(events) <= max_events:
-            return sorted(events, key=lambda event: int(event["timestamp"]))
+    @staticmethod
+    def _event_priority(event: dict[str, Any]) -> int:
+        """사건의 복기 우선순위를 정한다. 값은 모델 입력 선별용이며 실력 점수가 아니다."""
+        kind = str(event.get("kind", ""))
+        priority = {"death": 100, "objective": 85, "kill": 60, "assist": 45, "item": 5}.get(kind, 0)
+        phase = str(event.get("phase", ""))
+        objective_type = str(event.get("objective_type", ""))
 
-        priorities = {"death": 100, "objective": 90, "kill": 65, "assist": 50, "item": 10}
-        last_timestamp = max(int(event["timestamp"]) for event in events)
+        if kind == "objective":
+            priority += {"ELDER_DRAGON": 60, "BARON_NASHOR": 50, "DRAGON": 30, "RIFTHERALD": 25}.get(
+                objective_type, 15
+            )
+            if event.get("team") == "enemy":
+                priority += 10
+        if kind == "death" and phase == "late":
+            priority += 25
+        if kind in {"kill", "assist"} and phase == "late":
+            priority += 10
+        return priority
+
+    @classmethod
+    def _select_notable_events(cls, events: list[dict[str, Any]], max_events: int = 35) -> list[dict[str, Any]]:
+        """중요도와 고정 시간대를 함께 보장해 복기 장면을 선별한다."""
+        if not events:
+            return []
+
         selected_indices: set[int] = set()
-
-        # 각 시간대에서 가장 중요한 사건 하나를 먼저 확보해 후반부 유실을 막는다.
-        segment_size = max(1, (last_timestamp + 1) // 4)
-        for segment in range(4):
-            start = segment * segment_size
-            end = (segment + 1) * segment_size if segment < 3 else last_timestamp + 1
+        # 초반·중반·후반 각각의 대표 사건을 먼저 확보해 한 구간으로 분석이 치우치지 않게 한다.
+        for phase in ("early", "mid", "late"):
             candidates = [
                 (index, event)
                 for index, event in enumerate(events)
-                if start <= int(event["timestamp"]) < end
+                if event.get("phase") == phase
             ]
             if candidates:
                 selected_indices.add(
                     max(
                         candidates,
-                        key=lambda item: (
-                            priorities.get(str(item[1]["kind"]), 0),
-                            int(item[1]["timestamp"]),
-                        ),
+                        key=lambda item: (cls._event_priority(item[1]), int(item[1]["timestamp"])),
                     )[0]
                 )
 
-        # 남은 슬롯은 중요 사건 우선, 같은 중요도면 더 최근 사건 우선으로 선택한다.
         remaining = sorted(
             enumerate(events),
-            key=lambda item: (
-                -priorities.get(str(item[1]["kind"]), 0),
-                -int(item[1]["timestamp"]),
-            ),
+            key=lambda item: (-cls._event_priority(item[1]), -int(item[1]["timestamp"])),
         )
         for index, _event in remaining:
             if len(selected_indices) >= max_events:
@@ -489,13 +500,82 @@ class RiotClient:
             )
         ]
 
+    @classmethod
+    def _build_phase_summaries(cls, events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """모델이 시간대별 흐름을 비교할 수 있는 최소한의 정량 근거를 만든다."""
+        phase_labels = {"early": "초반 (0~10분)", "mid": "중반 (10~25분)", "late": "후반 (25분 이후)"}
+        summaries: dict[str, dict[str, Any]] = {}
+        for phase, label in phase_labels.items():
+            phase_events = [event for event in events if event.get("phase") == phase]
+            deaths = [event for event in phase_events if event["kind"] == "death"]
+            objectives = [event for event in phase_events if event["kind"] == "objective"]
+            summaries[phase] = {
+                "label": label,
+                "player_deaths": len(deaths),
+                "player_kills": sum(1 for event in phase_events if event["kind"] == "kill"),
+                "player_assists": sum(1 for event in phase_events if event["kind"] == "assist"),
+                "ally_objectives": sum(1 for event in objectives if event.get("team") == "ally"),
+                "enemy_objectives": sum(1 for event in objectives if event.get("team") == "enemy"),
+                "key_events": cls._select_notable_events(phase_events, max_events=3),
+            }
+        return summaries
+
+    @staticmethod
+    def _detect_review_patterns(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """원본 이벤트로 검증 가능한 패턴만 찾아 모델의 과도한 추론을 방지한다."""
+        patterns: list[dict[str, Any]] = []
+        deaths = [event for event in events if event["kind"] == "death"]
+        objectives = [event for event in events if event["kind"] == "objective"]
+
+        if deaths and deaths[0].get("phase") == "early":
+            patterns.append(
+                {
+                    "pattern": "early_first_death",
+                    "evidence": [deaths[0]],
+                    "guidance": "초반 첫 사망 시점의 웨이브·시야·교전 진입 판단을 복기",
+                }
+            )
+
+        for previous, current in zip(deaths, deaths[1:]):
+            if int(current["timestamp"]) - int(previous["timestamp"]) <= 3 * 60_000:
+                patterns.append(
+                    {
+                        "pattern": "clustered_deaths",
+                        "evidence": [previous, current],
+                        "guidance": "짧은 간격의 연속 사망 구간에서 복귀 후 재진입 판단을 복기",
+                    }
+                )
+                break
+
+        objective_window = 90_000
+        for death in deaths:
+            nearby_objective = next(
+                (
+                    objective
+                    for objective in objectives
+                    if abs(int(objective["timestamp"]) - int(death["timestamp"])) <= objective_window
+                ),
+                None,
+            )
+            if nearby_objective:
+                patterns.append(
+                    {
+                        "pattern": "objective_window_death",
+                        "evidence": [death, nearby_objective],
+                        "guidance": "오브젝트 전후 사망이므로 합류·시야·교전 진입 타이밍을 복기",
+                    }
+                )
+                break
+
+        return patterns[:3]
+
     def build_match_review_data(
         self,
         match_detail: dict[str, Any],
         timeline: dict[str, Any] | None,
         puuid: str,
     ) -> dict[str, Any]:
-        """Match-V5 Timeline을 경기 복기용 핵심 이벤트 데이터로 변환한다."""
+        """Match-V5 Timeline을 시간대·우선순위·근거 중심의 복기 데이터로 변환한다."""
         player = self.parse_match_for_player(match_detail, puuid)
         participant = self._find_participant(match_detail, puuid)
         participant_id = int(participant.get("participantId", 0))
@@ -507,11 +587,17 @@ class RiotClient:
         }
         events: list[dict[str, Any]] = []
 
+        def team_label(team_id: int) -> str:
+            if team_id == player_team_id:
+                return "ally"
+            return "enemy" if team_id else "unknown"
+
         def append_event(kind: str, timestamp: int, detail: str, **extra: Any) -> None:
             events.append(
                 {
                     "timestamp": timestamp,
                     "time": self._format_timestamp(timestamp),
+                    "phase": self._phase_from_timestamp(timestamp),
                     "kind": kind,
                     "detail": detail,
                     **extra,
@@ -530,25 +616,45 @@ class RiotClient:
                             append_event("kill", timestamp, "챔피언 처치")
                         elif participant_id in event.get("assistingParticipantIds", []):
                             append_event("assist", timestamp, "챔피언 처치 어시스트")
-                    elif event_type in {"ITEM_PURCHASED", "ITEM_SOLD", "ITEM_UNDO"} and event.get(
-                        "participantId"
-                    ) == participant_id:
-                        append_event("item", timestamp, str(event_type), item_id=event.get("itemId"))
+                    elif event_type == "ITEM_PURCHASED" and event.get("participantId") == participant_id:
+                        append_event("item", timestamp, "아이템 구매", item_id=event.get("itemId"))
                     elif event_type == "ELITE_MONSTER_KILL":
                         killer_id = int(event.get("killerId", 0))
                         killer_team_id = int(event.get("killerTeamId", 0)) or participant_teams.get(killer_id, 0)
-                        if killer_team_id == player_team_id:
-                            owner = "개인" if killer_id == participant_id else "팀"
-                            append_event(
-                                "objective",
-                                timestamp,
-                                f"{owner} {event.get('monsterType', 'OBJECTIVE')} 처치",
-                            )
+                        monster_type = str(event.get("monsterType", "OBJECTIVE"))
+                        if event.get("monsterSubType") == "ELDER_DRAGON":
+                            monster_type = "ELDER_DRAGON"
+                        append_event(
+                            "objective",
+                            timestamp,
+                            f"{team_label(killer_team_id)} 팀 {monster_type} 처치",
+                            team=team_label(killer_team_id),
+                            objective_type=monster_type,
+                            personal_contribution=killer_id == participant_id,
+                        )
+                    elif event_type == "BUILDING_KILL":
+                        building_type = str(event.get("buildingType", "BUILDING"))
+                        destroyed_team_id = int(event.get("teamId", 0))
+                        killer_id = int(event.get("killerId", 0))
+                        killer_team_id = participant_teams.get(killer_id, 0)
+                        if not killer_team_id and destroyed_team_id in {100, 200}:
+                            killer_team_id = 300 - destroyed_team_id
+                        append_event(
+                            "objective",
+                            timestamp,
+                            f"{team_label(killer_team_id)} 팀 {building_type} 파괴",
+                            team=team_label(killer_team_id),
+                            objective_type=building_type,
+                            personal_contribution=killer_id == participant_id,
+                        )
 
-        deaths = [event for event in events if event["kind"] == "death"]
+        deaths = sorted((event for event in events if event["kind"] == "death"), key=lambda event: int(event["timestamp"]))
         kills = [event for event in events if event["kind"] == "kill"]
         objectives = [event for event in events if event["kind"] == "objective"]
+        personal_objectives = [event for event in objectives if event.get("personal_contribution")]
         notable_events = self._select_notable_events(events)
+        phase_summaries = self._build_phase_summaries(events)
+        detected_patterns = self._detect_review_patterns(events)
 
         return {
             "player_match": player,
@@ -556,11 +662,14 @@ class RiotClient:
             "first_death_time": deaths[0]["time"] if deaths else None,
             "death_count_in_timeline": len(deaths),
             "kill_count_in_timeline": len(kills),
-            "personal_objectives": objectives,
+            "team_objectives": objectives,
+            "personal_objectives": personal_objectives,
+            "phase_summaries": phase_summaries,
+            "detected_patterns": detected_patterns,
             "timeline_event_count": len(events),
             "notable_event_count": len(notable_events),
             "notable_events": notable_events,
-            "event_selection_policy": "사망·팀 오브젝트 우선, 초·중·후반 시간대 균형 선별",
+            "event_selection_policy": "초반·중반·후반 대표 장면 보장, 사망·주요 오브젝트·타워 우선",
         }
 
     async def get_match_review(self, match_id: str, puuid: str) -> dict[str, Any]:

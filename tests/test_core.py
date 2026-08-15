@@ -220,3 +220,69 @@ class GeminiSessionGuardTest(unittest.TestCase):
         session = analyzer.sessions[1]
         self.assertLessEqual(len(session.history), GeminiAnalyzer.MAX_SESSION_HISTORY_MESSAGES)
         self.assertEqual(session.turn_count, GeminiAnalyzer.MAX_SESSION_TURNS + 5)
+
+
+class TimelineCoachingRulesTest(unittest.TestCase):
+    def test_review_data_has_phase_summaries_and_evidence_patterns(self):
+        client = RiotClient(api_key="test-key")
+        detail = match_payload("KR_4", champion="Ahri", win=False, kills=2, deaths=3, assists=4)
+        detail["info"]["participants"] = [
+            {**detail["info"]["participants"][0], "teamId": 100},
+            {"puuid": "enemy-puuid", "participantId": 2, "teamId": 200, "championName": "Zed"},
+        ]
+        timeline = {
+            "info": {
+                "frames": [
+                    {
+                        "events": [
+                            {"type": "CHAMPION_KILL", "timestamp": 8 * 60_000, "victimId": 1},
+                            {"type": "CHAMPION_KILL", "timestamp": 9 * 60_000, "victimId": 1},
+                            {"type": "CHAMPION_KILL", "timestamp": 16 * 60_000, "victimId": 1},
+                            {
+                                "type": "ELITE_MONSTER_KILL",
+                                "timestamp": 16 * 60_000 + 30_000,
+                                "killerId": 2,
+                                "killerTeamId": 200,
+                                "monsterType": "DRAGON",
+                            },
+                            {
+                                "type": "BUILDING_KILL",
+                                "timestamp": 20 * 60_000,
+                                "killerId": 1,
+                                "teamId": 200,
+                                "buildingType": "TOWER_BUILDING",
+                            },
+                            {
+                                "type": "ELITE_MONSTER_KILL",
+                                "timestamp": 31 * 60_000,
+                                "killerId": 2,
+                                "killerTeamId": 200,
+                                "monsterType": "BARON_NASHOR",
+                            },
+                        ]
+                    }
+                ]
+            }
+        }
+
+        review = client.build_match_review_data(detail, timeline, PUUID)
+
+        self.assertEqual(review["phase_summaries"]["early"]["player_deaths"], 2)
+        self.assertEqual(review["phase_summaries"]["mid"]["enemy_objectives"], 1)
+        self.assertEqual(review["phase_summaries"]["late"]["enemy_objectives"], 1)
+        self.assertTrue(any(event.get("objective_type") == "BARON_NASHOR" for event in review["notable_events"]))
+        self.assertTrue(any(pattern["pattern"] == "early_first_death" for pattern in review["detected_patterns"]))
+        self.assertTrue(any(pattern["pattern"] == "clustered_deaths" for pattern in review["detected_patterns"]))
+        self.assertTrue(any(pattern["pattern"] == "objective_window_death" for pattern in review["detected_patterns"]))
+
+    def test_event_priority_favors_late_baron_over_item_purchase(self):
+        late_baron = {
+            "timestamp": 30 * 60_000,
+            "phase": "late",
+            "kind": "objective",
+            "team": "enemy",
+            "objective_type": "BARON_NASHOR",
+        }
+        item = {"timestamp": 30 * 60_000, "phase": "late", "kind": "item"}
+
+        self.assertGreater(RiotClient._event_priority(late_baron), RiotClient._event_priority(item))
