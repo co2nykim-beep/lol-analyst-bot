@@ -89,7 +89,6 @@ class RiotClient:
         self.timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
         self.session: aiohttp.ClientSession | None = None
         self._data_dragon_version: str | None = None
-        self._champion_id_to_name: dict[str, str] | None = None
         self._rate_limiter = AsyncRequestLimiter(
             per_second=rate_limit_per_second,
             per_two_minutes=rate_limit_per_two_minutes,
@@ -200,16 +199,6 @@ class RiotClient:
         assert isinstance(result, dict)
         return result
 
-    async def get_summoner_by_puuid(self, puuid: str) -> dict[str, Any]:
-        """PUUID로 Summoner-V4 정보를 조회한다.
-
-        Spectator-V5는 PUUID가 아닌 암호화된 summonerId를 요구하므로 이 조회가 필요하다.
-        """
-        url = self._platform_url(f"/lol/summoner/v4/summoners/by-puuid/{quote(puuid, safe='')}")
-        result = await self._get(url, cache_ttl_seconds=900)
-        assert isinstance(result, dict)
-        return result
-
     async def get_league_entries(self, puuid: str) -> list[dict[str, Any]]:
         """솔로/자유 랭크 정보를 조회한다. 랭크 기록이 없으면 빈 목록을 반환한다."""
         url = self._platform_url(f"/lol/league/v4/entries/by-puuid/{quote(puuid, safe='')}")
@@ -256,22 +245,6 @@ class RiotClient:
         result = await self._get(url, allow_not_found=True, cache_ttl_seconds=86_400)
         return result if isinstance(result, dict) else None
 
-    async def get_active_game_by_summoner_id(self, summoner_id: str) -> dict[str, Any] | None:
-        """Spectator-V5에서 진행 중 게임의 로스터를 조회한다."""
-        url = self._platform_url(
-            f"/lol/spectator/v5/active-games/by-summoner/{quote(summoner_id, safe='')}"
-        )
-        result = await self._get(url, allow_not_found=True, cache_ttl_seconds=15)
-        return result if isinstance(result, dict) else None
-
-    async def get_active_game_for_puuid(self, puuid: str) -> dict[str, Any] | None:
-        """PUUID를 입력받아 진행 중 게임 로스터를 조회하는 편의 메서드."""
-        summoner = await self.get_summoner_by_puuid(puuid)
-        summoner_id = summoner.get("id")
-        if not summoner_id:
-            raise RiotAPIError(404, "진행 중 게임 조회에 필요한 소환사 정보를 찾지 못했습니다.")
-        return await self.get_active_game_by_summoner_id(str(summoner_id))
-
     async def get_data_dragon_version(self) -> str:
         """현재 챔피언 아이콘 URL에 사용할 Data Dragon 버전을 캐시한다."""
         if self._data_dragon_version:
@@ -287,21 +260,6 @@ class RiotClient:
         """챔피언명에 대응하는 Data Dragon 정사각형 아이콘 URL을 반환한다."""
         version = await self.get_data_dragon_version()
         return f"{self.DATA_DRAGON_BASE_URL}/cdn/{version}/img/champion/{quote(champion_name, safe='')}.png"
-
-    async def get_champion_name(self, champion_id: int | str) -> str:
-        """Spectator-V5의 숫자 championId를 한국어 챔피언명으로 변환한다."""
-        if self._champion_id_to_name is None:
-            version = await self.get_data_dragon_version()
-            data = await self._get_public_json(
-                f"{self.DATA_DRAGON_BASE_URL}/cdn/{version}/data/ko_KR/champion.json"
-            )
-            champions = data.get("data", {}) if isinstance(data, dict) else {}
-            self._champion_id_to_name = {
-                str(champion.get("key")): str(champion.get("name"))
-                for champion in champions.values()
-                if isinstance(champion, dict) and champion.get("key") and champion.get("name")
-            }
-        return self._champion_id_to_name.get(str(champion_id), f"챔피언 #{champion_id}")
 
     @staticmethod
     def _format_timestamp(milliseconds: int | float | None) -> str:

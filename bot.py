@@ -177,23 +177,23 @@ def build_review_embed(
     return embed
 
 
-def build_ingame_embed(
-    summoner_name: str,
+def build_composition_embed(
+    display_name: str,
     my_champion: str,
     my_team: list[str],
     enemy_team: list[str],
     advice: str,
 ) -> discord.Embed:
-    """공개 챔피언 조합을 기반으로 한 인게임 조언 카드."""
+    """사용자가 직접 제공한 챔피언 조합을 기반으로 한 사전 운영 조언 카드."""
     embed = discord.Embed(
-        title=f"{summoner_name} · 진행 중 게임 조합 코칭",
+        title=f"{display_name} · 챔피언 조합 코칭",
         description=clip_text(advice, 3_700),
         color=discord.Color.gold(),
     )
     embed.add_field(name="내 챔피언", value=f"**{my_champion}**", inline=True)
     embed.add_field(name="우리 팀", value=clip_text(", ".join(my_team) or "정보 없음", 1_000), inline=False)
     embed.add_field(name="상대 팀", value=clip_text(", ".join(enemy_team) or "정보 없음", 1_000), inline=False)
-    embed.set_footer(text="공개 챔피언 조합 기반 조언 · 적 위치·쿨다운 등 비공개 정보는 사용하지 않습니다")
+    embed.set_footer(text="직접 입력한 조합 기반 사전 조언 · 실시간 상태·적 위치·쿨다운은 사용하지 않습니다")
     return embed
 
 
@@ -395,59 +395,51 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
             LOGGER.exception("/롤 복기 처리 실패")
             await interaction.followup.send("경기 복기 중 예기치 않은 오류가 발생했습니다.")
 
-    @lol_group.command(name="인게임", description="진행 중 게임의 공개 챔피언 조합을 기반으로 운영 조언을 제공합니다.")
-    @app_commands.describe(game_name="게임 이름", tag_line="태그 (예: KR1)")
-    async def ingame_coaching(
+    @lol_group.command(name="조합", description="직접 입력한 챔피언 조합으로 사전 운영 조언을 제공합니다.")
+    @app_commands.describe(
+        my_champion="내 챔피언",
+        my_team="우리 팀 챔피언을 쉼표로 구분 (예: 아리, 리 신, 오른, 징크스, 룰루)",
+        enemy_team="상대 팀 챔피언을 쉼표로 구분",
+        display_name="선택: 카드에 표시할 이름",
+    )
+    async def composition_coaching(
         interaction: discord.Interaction,
-        game_name: str,
-        tag_line: str,
+        my_champion: str,
+        my_team: str,
+        enemy_team: str,
+        display_name: str | None = None,
     ) -> None:
         await interaction.response.defer(thinking=True)
         try:
-            puuid, summoner_name = await find_account(game_name, tag_line)
-            active_game = await riot_client.get_active_game_for_puuid(puuid)
-            if not active_game:
-                await interaction.followup.send("현재 진행 중인 소환사의 협곡 게임을 찾지 못했습니다.")
+            normalize = lambda raw: [champion.strip() for champion in raw.split(",") if champion.strip()]
+            my_team_list = normalize(my_team)
+            enemy_team_list = normalize(enemy_team)
+            if not my_team_list or not enemy_team_list:
+                await interaction.followup.send("우리 팀과 상대 팀 챔피언을 각각 쉼표로 구분해 입력해 주세요.")
                 return
+            if my_champion.strip() and my_champion.strip() not in my_team_list:
+                my_team_list.insert(0, my_champion.strip())
 
-            participants = active_game.get("participants", [])
-            me = next((item for item in participants if item.get("puuid") == puuid), None)
-            if not me:
-                await interaction.followup.send("진행 중 게임에서 해당 소환사를 찾지 못했습니다.")
-                return
-            my_team_id = me.get("teamId")
-
-            async def champion_label(participant: dict[str, Any]) -> str:
-                existing_name = participant.get("championName")
-                if existing_name:
-                    return str(existing_name)
-                champion_id = participant.get("championId")
-                return await riot_client.get_champion_name(champion_id) if champion_id else "알 수 없음"
-
-            labels = await asyncio.gather(*(champion_label(item) for item in participants))
-            labeled_participants = list(zip(participants, labels, strict=True))
-            my_champion = next(
-                (label for item, label in labeled_participants if item.get("puuid") == puuid),
-                "내 챔피언",
-            )
-            my_team = [label for item, label in labeled_participants if item.get("teamId") == my_team_id]
-            enemy_team = [label for item, label in labeled_participants if item.get("teamId") != my_team_id]
             advice = await asyncio.to_thread(
                 gemini_analyzer.analyze_ingame,
-                my_champion,
-                my_team,
-                enemy_team,
+                my_champion.strip(),
+                my_team_list,
+                enemy_team_list,
             )
             await interaction.followup.send(
-                embed=build_ingame_embed(summoner_name, my_champion, my_team, enemy_team, advice)
+                embed=build_composition_embed(
+                    display_name or "수동 입력 조합",
+                    my_champion.strip(),
+                    my_team_list,
+                    enemy_team_list,
+                    advice,
+                )
             )
-        except RiotAPIError as error:
-            await interaction.followup.send(f"Riot API 오류: {error.message}")
         except RuntimeError as error:
             await interaction.followup.send(str(error))
         except Exception:
-            LOGGER.exception("/롤 인게임 처리 실패")
-            await interaction.followup.send("인게임 조합 코칭 중 예기치 않은 오류가 발생했습니다.")
+            LOGGER.exception("/롤 조합 처리 실패")
+            await interaction.followup.send("챔피언 조합 코칭 중 예기치 않은 오류가 발생했습니다.")
 
     @lol_group.command(name="팁", description="특정 챔피언 간의 라인전 팁을 조회합니다.")
     @app_commands.describe(my_champ="내 챔피언", vs_champ="상대 챔피언")

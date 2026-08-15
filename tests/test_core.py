@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from bot import build_performance_embed, build_review_embed
+from bot import build_composition_embed, build_performance_embed, build_review_embed
 from gemini_analyzer import CoachingReport, GeminiAnalyzer
 from riot_client import RiotClient
 
@@ -103,6 +103,18 @@ class PresentationTest(unittest.TestCase):
         )
         self.assertEqual(one_liner, "초반 데스를 줄이고 미드 웨이브 관리에 집중하세요.")
         self.assertEqual(markdown, "## 총평\n좋습니다.")
+
+    def test_composition_embed_uses_only_manual_champion_lists(self):
+        embed = build_composition_embed(
+            display_name="수동 조합",
+            my_champion="아리",
+            my_team=["아리", "리 신", "오른", "징크스", "룰루"],
+            enemy_team=["제드", "바이", "나르", "카이사", "레오나"],
+            advice="## 내 역할\n테스트 조언",
+        )
+        self.assertIn("챔피언 조합 코칭", embed.title)
+        self.assertIn("아리", embed.fields[0].value)
+        self.assertIn("실시간 상태", embed.footer.text)
 
     def test_embeds_contain_core_metrics(self):
         report = CoachingReport(one_liner="라인 주도권을 안정적으로 전환하세요.", markdown="## 총평\n테스트 리포트")
@@ -220,6 +232,12 @@ class GeminiSessionGuardTest(unittest.TestCase):
         session = analyzer.sessions[1]
         self.assertLessEqual(len(session.history), GeminiAnalyzer.MAX_SESSION_HISTORY_MESSAGES)
         self.assertEqual(session.turn_count, GeminiAnalyzer.MAX_SESSION_TURNS + 5)
+
+
+class SpectatorRetirementTest(unittest.TestCase):
+    def test_riot_client_has_no_active_game_lookup(self):
+        self.assertFalse(hasattr(RiotClient, "get_active_game_for_puuid"))
+        self.assertFalse(hasattr(RiotClient, "get_active_game_by_summoner_id"))
 
 
 class TimelineCoachingRulesTest(unittest.TestCase):
