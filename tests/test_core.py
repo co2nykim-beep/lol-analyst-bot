@@ -104,6 +104,13 @@ class PresentationTest(unittest.TestCase):
         self.assertEqual(one_liner, "초반 데스를 줄이고 미드 웨이브 관리에 집중하세요.")
         self.assertEqual(markdown, "## 총평\n좋습니다.")
 
+    def test_invalid_model_prefix_is_replaced_with_safe_fallback(self):
+        one_liner, markdown = GeminiAnalyzer._extract_one_liner(
+            "-->52 chars. Perfect.\n## 총평\n형식이 섞인 응답"
+        )
+        self.assertIn("형식을 확인하지 못했습니다", one_liner)
+        self.assertIn("상세 코칭을 표시하지 않았습니다", markdown)
+
     def test_composition_embed_uses_only_manual_champion_lists(self):
         embed = build_composition_embed(
             display_name="수동 조합",

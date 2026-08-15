@@ -231,14 +231,20 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
             try:
-                thread = await source_message.create_thread(
+                # interaction.followup.send()가 반환한 WebhookMessage에는 guild 정보가 없을 수 있다.
+                # 스레드 API는 guild 정보가 붙은 일반 Message를 요구하므로 채널에서 다시 조회한다.
+                thread_source = source_message
+                if source_message.guild is None:
+                    thread_source = await channel.fetch_message(source_message.id)
+                thread = await thread_source.create_thread(
                     name=clip_text(thread_name, 100),
                     auto_archive_duration=60,
                 )
                 await thread.send("이 스레드에서 방금 받은 리포트에 대해 편하게 추가 질문해 주세요.")
                 return thread.id
-            except discord.DiscordException as error:
-                LOGGER.warning("코칭 스레드 생성 실패: %s", error)
+            except (discord.DiscordException, ValueError) as error:
+                # 카드 전송은 이미 성공한 상태이므로 스레드 실패가 분석 자체를 실패시키지 않게 한다.
+                LOGGER.warning("코칭 스레드 생성 실패; 현재 채널로 세션을 유지합니다: %s", error)
         return interaction.channel_id
 
     async def find_account(game_name: str, tag_line: str) -> tuple[str, str]:

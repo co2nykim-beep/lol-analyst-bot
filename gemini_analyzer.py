@@ -70,6 +70,9 @@ class GeminiAnalyzer:
                 config=types.GenerateContentConfig(
                     temperature=0.45,
                     max_output_tokens=max_output_tokens,
+                    # 이 봇은 모델 도구를 제공하지 않는다. SDK의 자동 함수 호출 경로를
+                    # 명시적으로 비활성화해 도구 처리용 텍스트가 사용자 리포트에 섞이지 않게 한다.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
             text = clean_latex((getattr(response, "text", None) or "").strip())
@@ -89,15 +92,17 @@ class GeminiAnalyzer:
 
         first_line = lines[0]
         match = re.match(r"(?:\*\*)?한줄 피드백(?:\*\*)?\s*[:：]\s*(.+)", first_line)
-        one_liner = match.group(1).strip() if match else first_line.lstrip("#-• ").strip()
-        one_liner = re.sub(r"\*+", "", one_liner)
-        one_liner = one_liner[:180].rstrip()
+        if not match:
+            # 모델의 도구 처리 문자열이나 잘린 응답을 사용자에게 코칭처럼 표시하지 않는다.
+            return (
+                "AI 리포트 형식을 확인하지 못했습니다. 전적 지표를 기준으로 다시 시도해 주세요.",
+                "## 분석 결과\nAI 응답 형식이 올바르지 않아 상세 코칭을 표시하지 않았습니다. 잠시 후 다시 시도해 주세요.",
+            )
 
-        markdown = text
-        if match:
-            markdown = "\n".join(lines[1:]).strip()
+        one_liner = re.sub(r"\*+", "", match.group(1).strip())[:180].rstrip()
+        markdown = "\n".join(lines[1:]).strip()
         if not markdown:
-            markdown = text
+            markdown = "## 분석 결과\n상세 코칭을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
         return one_liner, markdown[: GeminiAnalyzer.MAX_DISCORD_TEXT]
 
     @staticmethod
