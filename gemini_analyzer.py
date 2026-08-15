@@ -1,160 +1,275 @@
+"""Gemini 기반 League of Legends 코칭 분석 모듈."""
+
+from __future__ import annotations
+
+import json
 import re
 import threading
+from dataclasses import dataclass
+from typing import Any
 
 from cachetools import TTLCache
 from google import genai
 from google.genai import types
 
 
+@dataclass(frozen=True)
+class CoachingReport:
+    """디스코드 Embed와 코칭 스레드가 공유하는 분석 결과."""
+
+    one_liner: str
+    markdown: str
+
+
+@dataclass
+class CoachingSession:
+    """세션 원본 문맥과 길이가 제한된 사용자·모델 대화 이력."""
+
+    system_instruction: str
+    history: list[Any]
+    turn_count: int = 0
+
+
 def clean_latex(text: str) -> str:
-    """LaTeX 표현 및 특수 태그 제거/정리"""
+    """Discord 출력에 부적절한 LaTeX 문법과 과도한 공백을 정리한다."""
     if not text:
         return ""
-    text = re.sub(r'\\(?:Large|large|huge|Huge|small|tiny|bf|it)\b', '', text)
-    text = re.sub(r'\$\$?', '', text)
+    text = re.sub(r"\\(?:Large|large|huge|Huge|small|tiny|bf|it)\b", "", text)
+    text = re.sub(r"\$\$?", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
 class GeminiAnalyzer:
-    # 요구사항 반영: 기본 모델을 gemini-3.6-flash로 지정
-    def __init__(self, api_key: str, model_name: str = "gemini-3.6-flash"):
-        self.api_key = api_key
-        self.model_name = model_name or "gemini-3.6-flash"
-        self.client = genai.Client(api_key=api_key)
-        self.sessions: TTLCache = TTLCache(maxsize=500, ttl=7200)
+    """Gemini API를 이용한 전적 분석·코칭 대화 서비스."""
+
+    DEFAULT_MODEL = "gemini-3.6-flash"
+    MAX_DISCORD_TEXT = 3_700
+    MAX_SESSION_TURNS = 12
+    MAX_SESSION_HISTORY_MESSAGES = MAX_SESSION_TURNS * 2
+
+    def __init__(self, api_key: str | None, model_name: str | None = None) -> None:
+        self.api_key = (api_key or "").strip()
+        self.model_name = (model_name or self.DEFAULT_MODEL).strip()
+        self.client = genai.Client(api_key=self.api_key) if self.api_key else None
+        self.sessions: TTLCache[int, CoachingSession] = TTLCache(maxsize=500, ttl=7200)
         self._lock = threading.Lock()
 
-    def _generate(self, prompt: str) -> str:
+    def _ensure_client(self) -> Any:
+        if self.client is None:
+            raise RuntimeError("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.")
+        return self.client
+
+    def _generate(self, prompt: str, *, max_output_tokens: int = 1_100) -> str:
+        """최신 google-genai SDK의 Gemini 모델 호출을 하나의 경로로 통합한다."""
+        client = self._ensure_client()
         try:
-            response = self.client.models.generate_content(
+            response = client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.45,
+                    max_output_tokens=max_output_tokens,
+                ),
             )
-            return clean_latex((response.text or "").strip())
-        except Exception as e:
-            print(f"[GeminiAnalyzer] 생성 실패: {e}", flush=True)
-            return f"⚠️ AI 생성 실패: {e}"
+            text = clean_latex((getattr(response, "text", None) or "").strip())
+            if not text:
+                raise RuntimeError("Gemini가 빈 응답을 반환했습니다.")
+            return text
+        except Exception as error:
+            print(f"[GeminiAnalyzer] 생성 실패: {error}", flush=True)
+            raise RuntimeError("AI 코칭 리포트를 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.") from error
+
+    @staticmethod
+    def _extract_one_liner(text: str) -> tuple[str, str]:
+        """프롬프트의 고정 첫 줄을 Embed의 짧은 피드백으로 분리한다."""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return "분석 결과를 생성하지 못했습니다.", "분석 결과를 생성하지 못했습니다."
+
+        first_line = lines[0]
+        match = re.match(r"(?:\*\*)?한줄 피드백(?:\*\*)?\s*[:：]\s*(.+)", first_line)
+        one_liner = match.group(1).strip() if match else first_line.lstrip("#-• ").strip()
+        one_liner = re.sub(r"\*+", "", one_liner)
+        one_liner = one_liner[:180].rstrip()
+
+        markdown = text
+        if match:
+            markdown = "\n".join(lines[1:]).strip()
+        if not markdown:
+            markdown = text
+        return one_liner, markdown[: GeminiAnalyzer.MAX_DISCORD_TEXT]
+
+    @staticmethod
+    def _compact_json(data: dict[str, Any]) -> str:
+        """모델에 전달하는 지표를 일관된 JSON으로 직렬화한다."""
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+    def analyze_recent_performance(
+        self,
+        summoner_name: str,
+        performance: dict[str, Any],
+        rank_text: str,
+        queue_name: str,
+    ) -> CoachingReport:
+        """최근 5경기의 정량 지표를 토대로 개인화된 전적 코칭을 생성한다."""
+        prompt = f"""
+너는 리그 오브 레전드 전문 개인 코치다. 아래 전적은 '{summoner_name}'의 최근 {queue_name} 경기 데이터다.
+반드시 주어진 데이터에서 확인되는 사실만 근거로 삼고, 확인할 수 없는 스킬 적중률·와드 위치·교전 장면을 지어내지 마라.
+
+[티어]
+{rank_text}
+
+[전적 요약 JSON]
+{self._compact_json(performance)}
+
+다음 형식으로 한국어 코칭 리포트를 작성해라.
+첫 줄은 반드시 `한줄 피드백: `으로 시작하며, 80자 이내의 실전적인 핵심 진단을 쓴다.
+그 다음에는 `## 총평`, `## 잘한 점`, `## 다음 3경기 행동 목표` 제목을 각각 하나씩 사용한다.
+`다음 3경기 행동 목표`에는 실행 가능한 항목을 정확히 3개 작성한다.
+최근 경기 수가 적다면 표본이 작다는 점을 분명히 밝혀라.
+마크다운은 디스코드에서 바로 읽기 좋게 작성하고 LaTex 수식, 과도한 인사말, 면책문구는 쓰지 마라.
+""".strip()
+        text = self._generate(prompt)
+        one_liner, markdown = self._extract_one_liner(text)
+        return CoachingReport(one_liner=one_liner, markdown=markdown)
 
     def analyze_match_history(self, summoner_name: str, match_summary_text: str) -> str:
+        """기존 호출 코드와의 호환을 위한 전적 분석 래퍼."""
         prompt = f"""
-리그 오브 레전드 AI 코치로서 소환사 '{summoner_name}'의 최근 전적 데이터를 분석해 주세요.
+너는 리그 오브 레전드 전문 AI 코치다. 소환사 '{summoner_name}'의 최근 전적을 분석해라.
 
-[전적 요약 데이터]
+[전적 요약]
 {match_summary_text}
 
-다음 사항을 포함하여 디스코드에 보기 좋은 마크다운 형식으로 작성하세요:
-1. **플레이 스타일 총평**: 주 라인, 챔피언 폭, KDA/승률 종합 평가
-2. **강점 및 보완점**: 잘하고 있는 점과 개선이 필요한 부분
-3. **AI 추천 티어업 팁**: 승률을 올리기 위한 핵심 조언 2~3가지
-
-- LaTeX 수식 문법 사용 금지.
-"""
+첫 줄을 `한줄 피드백: ` 형식으로 쓰고, 이어서 `## 총평`, `## 강점`, `## 개선 목표`를 사용해
+근거 중심의 짧고 실전적인 한국어 코칭을 작성해라. LaTex 수식은 사용하지 마라.
+""".strip()
         return self._generate(prompt)
+
+    def analyze_match_review(self, summoner_name: str, review_data: dict[str, Any]) -> CoachingReport:
+        """Match-V5 타임라인 기반의 경기 종료 후 복기 리포트를 생성한다."""
+        prompt = f"""
+너는 리그 오브 레전드 전문 코치다. '{summoner_name}'의 단일 경기 복기 데이터를 분석해라.
+이 데이터는 Riot Match-V5의 결과 및 이벤트 타임라인에서 추출한 것이며, 영상 장면이나 스킬 적중 여부는 포함하지 않는다.
+따라서 없는 상황을 추정하지 말고, 사망 시점·처치·오브젝트·아이템 이벤트와 최종 지표만 근거로 조언해라.
+
+[경기 복기 JSON]
+{self._compact_json(review_data)}
+
+다음 형식을 지켜 한국어로 작성해라.
+첫 줄: `한줄 피드백: ` 뒤에 가장 중요한 복기 포인트를 80자 이내로 작성한다.
+이후 `## 경기 요약`, `## 다시 볼 타이밍`, `## 다음 게임 적용` 제목을 사용한다.
+`다시 볼 타이밍`에서는 제공된 이벤트 중 우선순위가 높은 시점을 최대 3개 제시한다. 타임라인이 없으면 그 한계를 명시하고 결과 지표 중심으로 쓴다.
+`다음 게임 적용`은 구체적인 실행 항목 3개로 끝낸다. LaTex 수식은 쓰지 마라.
+""".strip()
+        text = self._generate(prompt)
+        one_liner, markdown = self._extract_one_liner(text)
+        return CoachingReport(one_liner=one_liner, markdown=markdown)
 
     def ask_general(self, question: str) -> str:
-        """일반 멘션 질문 처리기"""
+        """일반 멘션 질문에 대해 간결한 LoL 코칭 답변을 생성한다."""
         prompt = f"""
-너는 리그 오브 레전드(LoL) 전문 AI 코치야. 소환사가 물어보는 롤 메타, 조합 상성, 라인전, 아이템 빌드 질문에 대해 핵심 위주로 명확하게 답변해줘.
+너는 리그 오브 레전드(LoL) 전문 AI 코치다. 다음 질문에 핵심 위주로 정확히 답하라.
+패치별 수치처럼 최신성이 중요한 정보는 단정하지 말고 사용자가 현재 게임 클라이언트에서 확인할 수 있도록 안내하라.
 
-[사용자 질문]: {question}
+[질문]
+{question}
 
-- 디스코드용 마크다운 형식 사용.
-- LaTeX 수식 표현 금지.
-"""
-        return self._generate(prompt)
-
-    def analyze_ingame(self, my_champ: str, my_team: list, enemy_team: list) -> str:
-        prompt = f"""
-리그 오브 레전드 AI 코치로서 현재 진행 중인 게임을 분석하세요.
-
-[내 챔피언]: {my_champ}
-[우리 팀 조합]: {', '.join(my_team)}
-[상대 팀 조합]: {', '.join(enemy_team)}
-
-다음 항목을 핵심 위주로 명확하게 작성하세요:
-1. **{my_champ} 운영 팁**: 이번 조합에서 {my_champ}가 집중해야 할 역할과 타이밍
-2. **경계해야 할 상대 챔피언**: 상대 팀 조합에서 특히 주의해야 할 챔피언과 이유
-3. **팀 승리 플랜**: 두 조합의 특성을 고려한 한타/운영 방향성
-
-- LaTeX 수식 표현($, \\Large 등) 금지.
-- 디스코드에 출력하기 좋은 핵심 위주 마크다운 형식 사용.
-"""
-        return self._generate(prompt)
+한국어 마크다운으로 350자 이내에 답하고 LaTex 수식은 사용하지 마라.
+""".strip()
+        return self._generate(prompt, max_output_tokens=600)
 
     def get_champion_tip(self, my_champ: str, vs_champ: str) -> str:
+        """특정 1:1 매치업의 라인전 중심 팁을 생성한다."""
         prompt = f"""
-리그 오브 레전드 AI 코치로서 챔피언 1v1 맞대결 팁을 제시하세요.
+너는 리그 오브 레전드 전문 AI 코치다. '{my_champ}' 대 '{vs_champ}'의 라인전 코칭을 작성해라.
+패치에 따라 달라질 수 있는 승률이나 수치로 상성을 단정하지 말고 스킬 교환, 웨이브, 시야, 레벨 타이밍 중심으로 설명해라.
 
-[내 챔피언]: {my_champ}
-[상대 챔피언]: {vs_champ}
+`## 라인전 핵심`, `## 딜교환`, `## 위험 신호`의 3개 제목을 쓰고 각 섹션을 짧게 작성해라.
+LaTex 수식은 사용하지 마라.
+""".strip()
+        return self._generate(prompt, max_output_tokens=750)
 
-다음 항목을 마크다운 형식으로 작성하세요:
-1. **라인전 주도권 및 상성 요약**: 상성 우위 및 초기 라인 관리법
-2. **딜교환 핵심 팁**: 주요 스킬 타이밍 및 딜교환 콤보
-3. **주의해야 할 상대 핵심 스킬**: 피하거나 의식해야 할 스킬
+    def analyze_ingame(self, my_champ: str, my_team: list[str], enemy_team: list[str]) -> str:
+        """진행 중 게임의 공개 로스터로 조합·운영 조언을 생성한다."""
+        prompt = f"""
+너는 리그 오브 레전드 전문 AI 코치다. 진행 중인 게임의 공개 챔피언 조합을 바탕으로 조언해라.
+적의 쿨다운, 위치, 시야처럼 플레이어가 게임 화면에서 알 수 없는 정보를 제공하거나, 행동을 강요하는 표현은 쓰지 마라.
 
-- LaTeX 수식 표현 금지.
-- 디스코드용 마크다운 형식 사용.
-"""
-        return self._generate(prompt)
+[내 챔피언] {my_champ}
+[우리 팀] {', '.join(my_team)}
+[상대 팀] {', '.join(enemy_team)}
+
+`## 내 역할`, `## 조합상 주의점`, `## 한타·오브젝트 플랜`을 중심으로 짧고 실전적인 한국어 코칭을 작성해라.
+""".strip()
+        return self._generate(prompt, max_output_tokens=800)
 
     def start_coaching_session(
-        self, session_id, summoner_name: str, match_summary: str, initial_analysis: str
-    ):
-        system_instruction = (
-            f"너는 리그 오브 레전드 AI 코치야. 지금 '{summoner_name}' 소환사와 "
-            "디스코드 스레드에서 방금 보낸 전적 분석에 대해 1:1로 대화하고 있어.\n\n"
-            f"[분석 대상 전적 데이터]\n{match_summary}\n\n"
-            f"[방금 사용자에게 보여준 최초 분석]\n{initial_analysis}\n\n"
-            "이후 사용자의 후속 질문에는 위 데이터를 근거로 짧고 실전적으로 답변해. "
-            "LaTeX 수식 표현은 쓰지 마."
-        )
-        try:
-            chat = self.client.chats.create(
-                model=self.model_name,
-                config=types.GenerateContentConfig(system_instruction=system_instruction),
-            )
-            with self._lock:
-                self.sessions[session_id] = chat
-            print(f"[GeminiAnalyzer] 코칭 세션 생성 완료: thread_id={session_id}", flush=True)
-        except Exception as e:
-            print(f"[GeminiAnalyzer] 코칭 세션 생성 실패: {e}", flush=True)
+        self,
+        session_id: int,
+        summoner_name: str,
+        match_summary: str,
+        initial_analysis: str,
+    ) -> None:
+        """분석 결과를 시스템 문맥으로 고정한 제한형 코칭 세션을 연다."""
+        self._ensure_client()
+        system_instruction = f"""
+너는 리그 오브 레전드 AI 코치다. 지금 '{summoner_name}'와 디스코드 코칭 스레드에서 대화한다.
 
-    def has_session(self, session_id) -> bool:
-        """bot.py 호환성을 위한 세션 존재 여부 확인 메서드 추가"""
+[전적 또는 경기 복기 데이터]
+{match_summary[:8000]}
+
+[최초 리포트]
+{initial_analysis[:5000]}
+
+후속 질문에는 위 데이터에서 확인되는 사실을 우선 근거로 삼아, 짧고 실전적으로 답한다.
+알 수 없는 장면·수치·플레이를 사실처럼 말하지 않는다. LaTex 수식은 사용하지 않는다.
+""".strip()
+        with self._lock:
+            self.sessions[session_id] = CoachingSession(system_instruction=system_instruction, history=[])
+        print(f"[GeminiAnalyzer] 제한형 코칭 세션 생성 완료: channel_id={session_id}", flush=True)
+
+    def has_session(self, session_id: int) -> bool:
         with self._lock:
             return session_id in self.sessions
 
-    def continue_coaching_session(self, session_id, user_message: str) -> str:
-        """bot.py 호출 메서드명과 일치시킴"""
+    def continue_coaching_session(self, session_id: int, user_message: str) -> str:
+        """제한된 최근 대화 이력과 고정 분석 문맥을 사용해 후속 질문에 답한다."""
         with self._lock:
-            chat = self.sessions.get(session_id)
-
-        if chat is None:
-            # 세션 만료 시 일반 질의응답으로 자연스럽게 전환
+            session = self.sessions.get(session_id)
+            if session is not None:
+                history = list(session.history[-self.MAX_SESSION_HISTORY_MESSAGES :])
+                system_instruction = session.system_instruction
+        if session is None:
             return self.ask_general(user_message)
 
+        client = self._ensure_client()
         try:
+            chat = client.chats.create(
+                model=self.model_name,
+                config=types.GenerateContentConfig(system_instruction=system_instruction),
+                history=history,
+            )
             response = chat.send_message(user_message)
-            return clean_latex((response.text or "").strip())
-        except Exception as e:
-            print(f"[GeminiAnalyzer] 코칭 대화 실패: {e}", flush=True)
-            return f"⚠️ 답변 생성에 실패했습니다: {e}"
+            text = clean_latex((getattr(response, "text", None) or "").strip())
+            if not text:
+                raise RuntimeError("Gemini가 빈 응답을 반환했습니다.")
 
-    # 하위 호환용 래퍼 메서드
-    def continue_coaching(self, session_id, user_message: str) -> str:
+            user_content = types.Content(role="user", parts=[types.Part.from_text(text=user_message)])
+            model_content = types.Content(role="model", parts=[types.Part.from_text(text=text)])
+            with self._lock:
+                current_session = self.sessions.get(session_id)
+                if current_session is not None:
+                    current_session.history.extend([user_content, model_content])
+                    current_session.history = current_session.history[-self.MAX_SESSION_HISTORY_MESSAGES :]
+                    current_session.turn_count += 1
+            return text[: self.MAX_DISCORD_TEXT]
+        except Exception as error:
+            print(f"[GeminiAnalyzer] 코칭 대화 실패: {error}", flush=True)
+            return "AI 코치 답변을 생성하지 못했습니다. 질문을 조금 바꾸어 다시 시도해 주세요."
+
+    def continue_coaching(self, session_id: int, user_message: str) -> str:
+        """이전 메서드명을 사용하는 호출부와의 호환 래퍼."""
         return self.continue_coaching_session(session_id, user_message)
-
-    def analyze_error(self, error_log: str) -> str:
-        prompt = f"""
-너는 파이썬(discord.py) 전문 디버깅 어시스턴트야. 아래는 실제 발생한 예외 트레이스백이야.
-
-[트레이스백]
-{error_log[:3000]}
-
-다음을 마크다운으로 간결하게 작성해:
-1. **원인**: 어떤 코드/줄에서 왜 발생했는지 1~2문장
-2. **해결 방법**: 구체적으로 어떤 코드를 어떻게 고쳐야 하는지
-3. **재발 방지 팁**: 비슷한 에러를 막을 수 있는 팁 (있다면)
-"""
-        return self._generate(prompt)
+""
