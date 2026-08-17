@@ -30,6 +30,36 @@ class CoachingSession:
     turn_count: int = 0
 
 
+def build_evidence_fallback(review_data: dict[str, Any]) -> str:
+    """AI 응답이 잘리거나 형식이 깨져도 원본 지표로 표시할 사후 복기 요약."""
+    match = review_data.get("player_match", {})
+    phases = review_data.get("phase_summaries", {})
+    patterns = review_data.get("detected_patterns", [])
+    events = review_data.get("notable_events", [])[:3]
+    phase_lines = []
+    for key, label in (("early", "초반"), ("mid", "중반"), ("late", "후반")):
+        summary = phases.get(key, {})
+        phase_lines.append(
+            f"- {label}: 사망 {summary.get('player_deaths', 0)}회, 처치 {summary.get('player_kills', 0)}회, "
+            f"어시스트 {summary.get('player_assists', 0)}회, 아군 오브젝트 {summary.get('ally_objectives', 0)}회"
+        )
+    event_lines = [f"- [{event.get('time', '?')}] {event.get('detail', '확인된 사건')}" for event in events]
+    pattern_lines = [f"- {pattern.get('guidance', pattern.get('pattern', '확인된 패턴'))}" for pattern in patterns]
+    if not event_lines:
+        event_lines = ["- 타임라인에서 표시할 주요 사건이 없습니다."]
+    if not pattern_lines:
+        pattern_lines = ["- 반복 패턴은 확인되지 않았습니다. 단일 경기 표본으로 해석하세요."]
+    return (
+        "## 시간대별 흐름\n" + "\n".join(phase_lines) + "\n\n"
+        "## 다시 볼 근거\n" + "\n".join(event_lines) + "\n\n"
+        "## 관측된 패턴\n" + "\n".join(pattern_lines) + "\n\n"
+        "## 다음 게임 플랜\n"
+        f"- {match.get('champion', '해당 챔피언')}의 첫 사망 시점과 직전 웨이브를 리플레이에서 확인하세요.\n"
+        "- 오브젝트 전후 90초 구간에서 합류 타이밍을 다시 확인하세요.\n"
+        "- 다음 경기에는 위 근거 중 하나를 골라 팀 콜로 사전 점검하세요."
+    )
+
+
 def clean_latex(text: str) -> str:
     """Discord 출력에 부적절한 LaTeX 문법과 과도한 공백을 정리한다."""
     if not text:
@@ -179,6 +209,8 @@ LaTex 수식, 과도한 인사말, 비난 표현은 쓰지 마라.
 """.strip()
         text = self._generate(prompt)
         one_liner, markdown = self._extract_one_liner(text)
+        if markdown.startswith("## 분석 결과\nAI 응답 형식이 올바르지 않아") or len(markdown.strip()) < 80:
+            markdown = build_evidence_fallback(review_data)
         return CoachingReport(one_liner=one_liner, markdown=markdown)
 
     def ask_general(self, question: str) -> str:

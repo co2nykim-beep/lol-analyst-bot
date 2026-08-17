@@ -167,9 +167,31 @@ def build_review_embed(
         value=(
             f"첫 사망: **{review_data.get('first_death_time') or '없음'}**\n"
             f"사망 {review_data.get('death_count_in_timeline', 0)}회 · "
-            f"개인 오브젝트 {len(review_data.get('personal_objectives', []))}회"
+            f"처치 {review_data.get('kill_count_in_timeline', 0)}회\n"
+            f"개인 오브젝트 {len(review_data.get('personal_objectives', []))}회 · "
+            f"전체 사건 {review_data.get('timeline_event_count', 0)}개"
         ),
         inline=True,
+    )
+    phase_summaries = review_data.get('phase_summaries', {})
+    phase_lines = []
+    for key, label in (("early", "초반"), ("mid", "중반"), ("late", "후반")):
+        summary = phase_summaries.get(key, {})
+        phase_lines.append(
+            f"**{label}** 사망 {summary.get('player_deaths', 0)} · "
+            f"처치 {summary.get('player_kills', 0)} · "
+            f"오브젝트 {summary.get('ally_objectives', 0)}"
+        )
+    embed.add_field(name="시간대 흐름", value="\n".join(phase_lines), inline=False)
+    notable_events = review_data.get('notable_events', [])
+    event_lines = [
+        f"• **{event.get('time', '?')}** {event.get('detail', '확인된 사건')}"
+        for event in notable_events[:5]
+    ]
+    embed.add_field(
+        name="확인된 주요 사건",
+        value=clip_text("\n".join(event_lines) or "타임라인 주요 사건 없음", 1_000),
+        inline=False,
     )
     embed.add_field(name="AI 한줄 피드백", value=clip_text(report.one_liner, 300), inline=False)
     embed.set_footer(text=f"{timeline_status} · 영상 리플레이를 직접 판독한 결과는 아닙니다")
@@ -470,7 +492,22 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
             LOGGER.exception("/롤 팁 처리 실패")
             await interaction.followup.send("챔피언 팁 생성 중 오류가 발생했습니다.")
 
+    async def tournament_team_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """대회 팀명 입력을 Discord 자동완성으로 안내한다."""
+        from tournament_scouting import OPPONENTS
+
+        query = current.strip().lower()
+        return [
+            app_commands.Choice(name=team_name, value=team_name)
+            for team_name in OPPONENTS
+            if not query or query in team_name.lower()
+        ][:25]
+
     @bot.tree.command(name="대회상대", description="대회 상대의 확인된 전적·조합·약점 카드를 조회합니다.")
+    @app_commands.autocomplete(team_name=tournament_team_autocomplete)
     @app_commands.describe(team_name="팀명 (예: 아산드림윙즈, TEAM 91)")
     async def tournament_opponent(interaction: discord.Interaction, team_name: str) -> None:
         """사용자에게 확인된 원본 경기 기반의 대회 상대 카드를 제공한다."""
@@ -483,11 +520,18 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
         await interaction.response.send_message(embed=embed)
 
     @bot.tree.command(name="밴픽카드", description="상대별 3밴–3픽–2밴–2픽 대회 카드를 조회합니다.")
-    @app_commands.describe(team_name="팀명", side="진영: 블루 또는 레드")
+    @app_commands.describe(team_name="팀명", side="진영")
+    @app_commands.autocomplete(team_name=tournament_team_autocomplete)
+    @app_commands.choices(
+        side=[
+            app_commands.Choice(name="블루 진영", value="blue"),
+            app_commands.Choice(name="레드 진영", value="red"),
+        ]
+    )
     async def tournament_draft(interaction: discord.Interaction, team_name: str, side: str) -> None:
         """상대와 진영에 맞춘 경기 전 밴픽 카드를 제공한다."""
         if side.strip().lower() not in {"blue", "블루", "red", "레드"}:
-            await interaction.response.send_message("진영은 `블루` 또는 `레드`로 입력해 주세요.", ephemeral=True)
+            await interaction.response.send_message("진영은 Discord 선택지에서 `블루 진영` 또는 `레드 진영`을 선택해 주세요.", ephemeral=True)
             return
         embed = discord.Embed(
             title=f"밴픽 카드 · {team_name} · {side}",

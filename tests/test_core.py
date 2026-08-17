@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from bot import build_composition_embed, build_performance_embed, build_review_embed
-from gemini_analyzer import CoachingReport, GeminiAnalyzer
+from gemini_analyzer import CoachingReport, GeminiAnalyzer, build_evidence_fallback
 from riot_client import RiotClient
 
 
@@ -171,6 +171,33 @@ class PresentationTest(unittest.TestCase):
             champion_icon_url=None,
         )
         self.assertIn("패배", review_embed.fields[0].value)
+        self.assertEqual(review_embed.fields[2].name, "시간대 흐름")
+        self.assertIn("확인된 주요 사건", [field.name for field in review_embed.fields])
+
+    def test_review_embed_shows_notable_event_when_present(self):
+        report = CoachingReport(one_liner="근거 기반 피드백", markdown="## 총평\n상세")
+        embed = build_review_embed(
+            summoner_name="테스터#KR1",
+            review_data={
+                "player_match": {"champion": "Camille", "win": True, "game_duration": "32:55", "kills": 12, "deaths": 9, "assists": 17, "damage_to_champions": 39482},
+                "timeline_available": True,
+                "first_death_time": "3:11",
+                "death_count_in_timeline": 9,
+                "kill_count_in_timeline": 12,
+                "personal_objectives": [],
+                "timeline_event_count": 4,
+                "phase_summaries": {"early": {"player_deaths": 2, "player_kills": 3, "ally_objectives": 1}, "mid": {}, "late": {}},
+                "notable_events": [{"time": "3:11", "detail": "챔피언 처치에 의해 사망"}],
+            },
+            report=report,
+            champion_icon_url=None,
+        )
+        self.assertTrue(any("3:11" in field.value for field in embed.fields))
+
+    def test_evidence_fallback_contains_review_sections(self):
+        fallback = build_evidence_fallback({"player_match": {"champion": "Camille"}, "phase_summaries": {}, "notable_events": [], "detected_patterns": []})
+        self.assertIn("## 시간대별 흐름", fallback)
+        self.assertIn("## 다음 게임 플랜", fallback)
 
 
 if __name__ == "__main__":
