@@ -226,10 +226,10 @@ LaTex 수식, 과도한 인사말, 비난 표현은 쓰지 마라.
 """.strip()
         return self._generate(prompt, max_output_tokens=600)
 
-    def get_champion_tip(self, my_champ: str, vs_champ: str) -> str:
-        """특정 1:1 매치업의 라인전 중심 팁을 생성한다."""
+    def get_champion_tip(self, my_champ: str, vs_champ: str, lane: str = "미확인") -> str:
+        """선택한 라인과 1:1 매치업을 함께 반영한 라인전 팁을 생성한다."""
         prompt = f"""
-너는 리그 오브 레전드 전문 AI 코치다. '{my_champ}' 대 '{vs_champ}'의 라인전 코칭을 작성해라.
+너는 리그 오브 레전드 전문 AI 코치다. {lane} 라인에서 '{my_champ}' 대 '{vs_champ}'의 라인전 코칭을 작성해라.
 패치에 따라 달라질 수 있는 승률이나 수치로 상성을 단정하지 말고 스킬 교환, 웨이브, 시야, 레벨 타이밍 중심으로 설명해라.
 
 `## 라인전 핵심`, `## 딜교환`, `## 위험 신호`의 3개 제목을 쓰고 각 섹션을 짧게 작성해라.

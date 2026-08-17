@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from external_sources import merge_external_into_performance
 from gemini_analyzer import CoachingReport, GeminiAnalyzer
 from riot_client import RiotAPIError, RiotClient
 from tournament_scouting import command_help, draft_card, opponent_report, team_report
@@ -28,10 +29,20 @@ LOGGER = logging.getLogger("lol_analyst_bot")
 QUEUE_TYPES = {
     420: "솔로 랭크",
     440: "자유 랭크",
-    450: "칼바람 나락",
     400: "일반 게임",
-    490: "빠른 대전",
 }
+QUEUE_CHOICES = [
+    app_commands.Choice(name="솔로 랭크", value="420"),
+    app_commands.Choice(name="자유 랭크", value="440"),
+    app_commands.Choice(name="일반 게임", value="400"),
+]
+LANE_CHOICES = [
+    app_commands.Choice(name="탑", value="TOP"),
+    app_commands.Choice(name="정글", value="JUNGLE"),
+    app_commands.Choice(name="미드", value="MIDDLE"),
+    app_commands.Choice(name="원딜", value="BOTTOM"),
+    app_commands.Choice(name="서폿", value="UTILITY"),
+]
 ROLE_NAMES = {
     "TOP": "탑",
     "JUNGLE": "정글",
@@ -129,8 +140,14 @@ def build_performance_embed(
         inline=True,
     )
     embed.add_field(name="현재 티어", value=clip_text(rank_text, 1_000), inline=False)
+    evidence = performance.get("evidence_bundle")
+    if evidence is not None:
+        embed.add_field(name="분석 근거", value=clip_text(evidence.display_line(), 1_000), inline=False)
+        summaries = evidence.summaries()
+        if summaries:
+            embed.add_field(name="외부 검증 메모", value=clip_text("\n".join(summaries), 1_000), inline=False)
     embed.add_field(name="AI 한줄 피드백", value=clip_text(report.one_liner, 300), inline=False)
-    embed.set_footer(text="Riot Match-V5 기반 · 경기 수가 적으면 참고용으로 해석하세요")
+    embed.set_footer(text="Riot Match-V5 수치 우선 · 외부 출처는 검증 등록분만 보조 · 표본 10경기")
     if champion_icon_url:
         embed.set_thumbnail(url=champion_icon_url)
     return embed
@@ -302,22 +319,27 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
         except discord.NotFound:
             return
 
-    @lol_group.command(name="전적", description="최근 5경기의 정량 지표와 AI 코칭 리포트를 조회합니다.")
-    @app_commands.describe(game_name="게임 이름", tag_line="태그 (예: KR1)")
+    @lol_group.command(name="전적", description="선택한 모드의 최근 10경기 정량 지표와 AI 코칭을 조회합니다.")
+    @app_commands.describe(game_name="게임 이름", tag_line="태그 (예: KR1)", queue_type="분석할 게임 모드")
+    @app_commands.choices(queue_type=QUEUE_CHOICES)
     async def match_analysis(
         interaction: discord.Interaction,
         game_name: str,
         tag_line: str,
+        queue_type: str,
     ) -> None:
         await interaction.response.defer(thinking=True)
         try:
             puuid, summoner_name = await find_account(game_name, tag_line)
+            queue_id = int(queue_type)
+            queue_name = QUEUE_TYPES[queue_id]
             performance, rank_text = await asyncio.gather(
-                riot_client.get_recent_performance(puuid=puuid, count=5, queue=420),
+                riot_client.get_recent_performance(puuid=puuid, count=10, queue=queue_id),
                 get_rank_text(puuid),
             )
+            performance = merge_external_into_performance(performance, summoner_name)
             if not performance.get("games"):
-                await interaction.followup.send("최근 솔로 랭크 기록이 없습니다. 다른 모드의 기록은 아직 분석 대상이 아닙니다.")
+                await interaction.followup.send(f"{queue_name} 최근 기록이 없습니다. 다른 모드를 선택해 보세요.")
                 return
 
             report = await asyncio.to_thread(
@@ -325,7 +347,7 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
                 summoner_name,
                 performance,
                 rank_text,
-                "솔로 랭크",
+                queue_name,
             )
             try:
                 icon_url = await riot_client.get_champion_icon_url(str(performance["main_champion"]))
@@ -335,7 +357,7 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
 
             embed = build_performance_embed(
                 summoner_name=summoner_name,
-                queue_name="솔로 랭크",
+                queue_name=queue_name,
                 performance=performance,
                 rank_text=rank_text,
                 report=report,
@@ -345,14 +367,16 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
             session_id = await open_coaching_thread(
                 interaction,
                 source_message,
-                f"{game_name} · 솔로 랭크 AI 코치",
+                f"{game_name} · {queue_name} AI 코치",
             )
-            await asyncio.to_thread(
-                gemini_analyzer.start_coaching_session,
-                session_id,
-                summoner_name,
-                str(performance),
-                report.markdown,
+            asyncio.create_task(
+                asyncio.to_thread(
+                    gemini_analyzer.start_coaching_session,
+                    session_id,
+                    summoner_name,
+                    str(performance),
+                    report.markdown,
+                )
             )
         except RiotAPIError as error:
             await interaction.followup.send(f"Riot API 오류: {error.message}")
@@ -360,7 +384,7 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
             await interaction.followup.send(str(error))
         except Exception:
             LOGGER.exception("/롤 전적 처리 실패")
-            await interaction.followup.send("전적 분석 중 예기치 않은 오류가 발생했습니다.")
+            await interaction.followup.send("전적 분석 중 오류가 발생했습니다. Riot API 키·Riot ID·선택한 게임 모드를 확인해 주세요.")
 
     @lol_group.command(name="복기", description="최근 경기의 Match-V5 이벤트 타임라인으로 사후 복기합니다.")
     @app_commands.describe(
@@ -470,18 +494,21 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
             LOGGER.exception("/롤 조합 처리 실패")
             await interaction.followup.send("챔피언 조합 코칭 중 예기치 않은 오류가 발생했습니다.")
 
-    @lol_group.command(name="팁", description="특정 챔피언 간의 라인전 팁을 조회합니다.")
-    @app_commands.describe(my_champ="내 챔피언", vs_champ="상대 챔피언")
+    @lol_group.command(name="팁", description="라인과 챔피언을 선택해 라인전 팁을 조회합니다.")
+    @app_commands.describe(my_champ="내 챔피언", vs_champ="상대 챔피언", lane="라인")
+    @app_commands.choices(lane=LANE_CHOICES)
     async def champion_tip(
         interaction: discord.Interaction,
         my_champ: str,
         vs_champ: str,
+        lane: str,
     ) -> None:
         await interaction.response.defer(thinking=True)
         try:
-            advice = await asyncio.to_thread(gemini_analyzer.get_champion_tip, my_champ, vs_champ)
+            lane_name = ROLE_NAMES.get(lane, "미확인")
+            advice = await asyncio.to_thread(gemini_analyzer.get_champion_tip, my_champ, vs_champ, lane_name)
             embed = discord.Embed(
-                title=f"{my_champ} vs {vs_champ} 라인전 팁",
+                title=f"{lane_name} · {my_champ} vs {vs_champ} 라인전 팁",
                 description=clip_text(advice, 3_700),
                 color=discord.Color.teal(),
             )

@@ -94,6 +94,7 @@ class RiotClient:
             per_two_minutes=rate_limit_per_two_minutes,
         )
         self._response_cache: TTLCache[str, tuple[float, Any]] = TTLCache(maxsize=2_000, ttl=86_400)
+        self._performance_cache: TTLCache[str, dict[str, Any]] = TTLCache(maxsize=200, ttl=30)
 
     async def init_session(self) -> None:
         """필요할 때만 공유 HTTP 세션을 생성한다."""
@@ -329,7 +330,7 @@ class RiotClient:
         if not match_ids:
             return []
 
-        semaphore = asyncio.Semaphore(3)
+        semaphore = asyncio.Semaphore(5)
 
         async def fetch_one(match_id: str) -> dict[str, Any] | None:
             async with semaphore:
@@ -354,6 +355,10 @@ class RiotClient:
         queue: int | None = None,
     ) -> dict[str, Any]:
         """최근 전적을 요약해 Gemini 프롬프트와 Embed에 바로 사용할 수 있게 만든다."""
+        cache_key = f"performance:{puuid}:{queue}:{count}"
+        cached = self._performance_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
         matches = await self.get_recent_match_summaries(puuid=puuid, count=count, queue=queue)
         if not matches:
             return {"games": 0, "matches": []}
@@ -367,7 +372,7 @@ class RiotClient:
         total_deaths = sum(match["deaths"] for match in matches)
         total_assists = sum(match["assists"] for match in matches)
 
-        return {
+        summary = {
             "games": games,
             "wins": wins,
             "losses": games - wins,
@@ -389,6 +394,8 @@ class RiotClient:
             ],
             "matches": matches,
         }
+        self._performance_cache[cache_key] = summary
+        return dict(summary)
 
     @staticmethod
     def _phase_from_timestamp(timestamp: int) -> str:
