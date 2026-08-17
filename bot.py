@@ -243,6 +243,7 @@ class LolCoachBot(commands.Bot):
     def __init__(self, *, riot_client: RiotClient, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.riot_client = riot_client
+        self._commands_synced = False
 
     async def close(self) -> None:
         await self.riot_client.close_session()
@@ -298,9 +299,31 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
     @bot.event
     async def on_ready() -> None:
         LOGGER.info("Discord 연결 성공: %s", bot.user)
+        if bot._commands_synced:
+            return
         try:
+            # 이전 버전에서 등록한 전역 명령어가 Discord에 남아 같은 이름이 중복되는
+            # 문제를 막기 위해 현재 코드의 명령 트리만 다시 전역 동기화한다.
+            current_commands = list(bot.tree.get_commands())
+            bot.tree.clear_commands(guild=None)
+            for command in current_commands:
+                bot.tree.add_command(command)
             synced = await bot.tree.sync()
-            LOGGER.info("동기화 완료된 글로벌 슬래시 명령어: %s개", len(synced))
+
+            guild_id_raw = os.getenv("DISCORD_GUILD_ID", "").strip()
+            if guild_id_raw.isdigit():
+                guild = discord.Object(id=int(guild_id_raw))
+                bot.tree.clear_commands(guild=guild)
+                bot.tree.copy_global_to(guild=guild)
+                guild_synced = await bot.tree.sync(guild=guild)
+                LOGGER.info(
+                    "슬래시 명령어 동기화 완료: 전역 %s개 · 테스트 서버 %s개",
+                    len(synced),
+                    len(guild_synced),
+                )
+            else:
+                LOGGER.info("동기화 완료된 글로벌 슬래시 명령어: %s개", len(synced))
+            bot._commands_synced = True
         except Exception:
             LOGGER.exception("슬래시 명령어 동기화 실패")
 

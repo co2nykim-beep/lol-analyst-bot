@@ -36,6 +36,7 @@ Riot Match-V5 수치를 기본 근거로 사용하고, 운영자가 직접 교�
 ```env
 DISCORD_BOT_TOKEN=your_discord_bot_token
 DISCORD_CHANNEL_ID=your_default_channel_id
+DISCORD_GUILD_ID=your_discord_server_id
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3.6-flash
 RIOT_API_KEY=your_riot_api_key
@@ -49,7 +50,7 @@ sudo pip3 install -r requirements.txt
 python3 bot.py
 ```
 
-Discord Developer Portal에서 **Message Content Intent**를 활성화해야 AI 코칭 스레드의 일반 대화와 봇 멘션 질의응답이 작동합니다. 봇 초대에는 `bot` 및 `applications.commands` 스코프와 메시지 전송·스레드 생성·스레드 메시지 전송 권한이 필요합니다.
+`DISCORD_GUILD_ID`를 설정하면 봇 재시작 때 해당 테스트 서버의 명령어도 현재 코드 기준으로 즉시 재동기화해 오래된 중복 명령어를 제거합니다. 전역 명령어는 Discord 전파에 시간이 걸릴 수 있습니다. Discord Developer Portal에서 **Message Content Intent**를 활성화해야 AI 코칭 스레드의 일반 대화와 봇 멘션 질의응답이 작동합니다. 봇 초대에는 `bot` 및 `applications.commands` 스코프와 메시지 전송·스레드 생성·스레드 메시지 전송 권한이 필요합니다.
 
 ## Render 배포
 
