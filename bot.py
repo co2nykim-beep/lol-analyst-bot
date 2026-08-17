@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 from gemini_analyzer import CoachingReport, GeminiAnalyzer
 from riot_client import RiotAPIError, RiotClient
+from tournament_scouting import command_help, draft_card, opponent_report, team_report
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -468,6 +469,51 @@ def create_bot(riot_client: RiotClient, gemini_analyzer: GeminiAnalyzer) -> LolC
         except Exception:
             LOGGER.exception("/롤 팁 처리 실패")
             await interaction.followup.send("챔피언 팁 생성 중 오류가 발생했습니다.")
+
+    @bot.tree.command(name="대회상대", description="대회 상대의 확인된 전적·조합·약점 카드를 조회합니다.")
+    @app_commands.describe(team_name="팀명 (예: 아산드림윙즈, TEAM 91)")
+    async def tournament_opponent(interaction: discord.Interaction, team_name: str) -> None:
+        """사용자에게 확인된 원본 경기 기반의 대회 상대 카드를 제공한다."""
+        embed = discord.Embed(
+            title=f"대회 상대 · {team_name}",
+            description=clip_text(opponent_report(team_name), 3_900),
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="원본 경기·체크인·교차검증 기반 · 공식 로스터 공개 전 잠정 자료")
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="밴픽카드", description="상대별 3밴–3픽–2밴–2픽 대회 카드를 조회합니다.")
+    @app_commands.describe(team_name="팀명", side="진영: 블루 또는 레드")
+    async def tournament_draft(interaction: discord.Interaction, team_name: str, side: str) -> None:
+        """상대와 진영에 맞춘 경기 전 밴픽 카드를 제공한다."""
+        if side.strip().lower() not in {"blue", "블루", "red", "레드"}:
+            await interaction.response.send_message("진영은 `블루` 또는 `레드`로 입력해 주세요.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title=f"밴픽 카드 · {team_name} · {side}",
+            description=clip_text(draft_card(team_name, side), 3_900),
+            color=discord.Color.red(),
+        )
+        embed.set_footer(text="경기 전 의사결정 보조 · 실시간 게임 정보는 수집하지 않음")
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="우리팀", description="구로야호의 대회 공통 운영 원칙을 조회합니다.")
+    async def tournament_team(interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="구로야호 · 대회 운영 카드",
+            description=clip_text(team_report(), 3_900),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="대회도움말", description="대회용 전적·밴픽 명령어 사용법을 조회합니다.")
+    async def tournament_help(interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="구로야호 대회 봇 도움말",
+            description=command_help(),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed)
 
     bot.tree.add_command(lol_group)
 
